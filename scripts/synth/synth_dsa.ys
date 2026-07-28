@@ -1,0 +1,146 @@
+# synth_dsa.ys — Hierarchical synthesis for specLLM_dsa_top
+# Strategy (from sparsenn v22 lessons):
+#   - FP32 modules pre-synthesized as blackboxes (avoid ABC SAT explosion)
+#   - SRAMs as blackboxes (scratchpad_1024x128_freepdk45 + quantify_buffer_sram)
+#   - keep_hierarchy on compute modules (prevent ABC cross-module optimization)
+#   - synth -top (preserve instance hierarchy, no flatten)
+#
+# Reference: /home/wangduo/project/sparsenn/cpu_st_top/st_v20/synth_v20.ys
+#            /home/wangduo/project/sparsenn/docs/superpowers/plans/synth.md
+
+# ═══════════════════════════════════════════════════════════
+# Phase 0: Pre-synthesize FP32 modules as blackboxes
+# ═══════════════════════════════════════════════════════════
+
+# Step 0a: fp32_mul
+design -reset
+read_verilog -sv /home/wangduo/project/SpecLLMDSA/rtl/fp32_mul.v
+hierarchy -top fp32_mul
+proc; techmap
+dfflibmap -liberty /home/wangduo/gemmini-flow/flow/platforms/nangate45/lib/NangateOpenCellLibrary_typical.lib
+abc -liberty /home/wangduo/gemmini-flow/flow/platforms/nangate45/lib/NangateOpenCellLibrary_typical.lib
+opt_clean -purge
+write_verilog -noexpr -nodec -noattr /home/wangduo/project/SpecLLMDSA/results/bb_fp32_mul.v
+
+# Step 0b: fp32_add
+design -reset
+read_verilog -sv /home/wangduo/project/SpecLLMDSA/rtl/fp32_add.v
+hierarchy -top fp32_add
+proc; techmap
+dfflibmap -liberty /home/wangduo/gemmini-flow/flow/platforms/nangate45/lib/NangateOpenCellLibrary_typical.lib
+abc -liberty /home/wangduo/gemmini-flow/flow/platforms/nangate45/lib/NangateOpenCellLibrary_typical.lib
+opt_clean -purge
+write_verilog -noexpr -nodec -noattr /home/wangduo/project/SpecLLMDSA/results/bb_fp32_add.v
+
+# Step 0c: fp32_exp
+design -reset
+read_verilog -sv /home/wangduo/project/SpecLLMDSA/rtl/fp32_exp.v
+hierarchy -top fp32_exp
+proc; techmap
+dfflibmap -liberty /home/wangduo/gemmini-flow/flow/platforms/nangate45/lib/NangateOpenCellLibrary_typical.lib
+abc -liberty /home/wangduo/gemmini-flow/flow/platforms/nangate45/lib/NangateOpenCellLibrary_typical.lib
+opt_clean -purge
+write_verilog -noexpr -nodec -noattr /home/wangduo/project/SpecLLMDSA/results/bb_fp32_exp.v
+
+# Step 0d: fp32_gelu
+design -reset
+read_verilog -sv /home/wangduo/project/SpecLLMDSA/rtl/fp32_gelu.v
+hierarchy -top fp32_gelu
+proc; techmap
+dfflibmap -liberty /home/wangduo/gemmini-flow/flow/platforms/nangate45/lib/NangateOpenCellLibrary_typical.lib
+abc -liberty /home/wangduo/gemmini-flow/flow/platforms/nangate45/lib/NangateOpenCellLibrary_typical.lib
+opt_clean -purge
+write_verilog -noexpr -nodec -noattr /home/wangduo/project/SpecLLMDSA/results/bb_fp32_gelu.v
+
+# Step 0e: fp32_sqrt
+design -reset
+read_verilog -sv /home/wangduo/project/SpecLLMDSA/rtl/fp32_sqrt.v
+hierarchy -top fp32_sqrt
+proc; techmap
+dfflibmap -liberty /home/wangduo/gemmini-flow/flow/platforms/nangate45/lib/NangateOpenCellLibrary_typical.lib
+abc -liberty /home/wangduo/gemmini-flow/flow/platforms/nangate45/lib/NangateOpenCellLibrary_typical.lib
+opt_clean -purge
+write_verilog -noexpr -nodec -noattr /home/wangduo/project/SpecLLMDSA/results/bb_fp32_sqrt.v
+
+# ═══════════════════════════════════════════════════════════
+# Phase 1: Pre-synthesize PE cells as blackboxes
+# ═══════════════════════════════════════════════════════════
+
+# Step 1a: pe_int8
+design -reset
+read_verilog -sv /home/wangduo/project/SpecLLMDSA/rtl/pe_int8.v
+hierarchy -top pe_int8
+proc; techmap
+dfflibmap -liberty /home/wangduo/gemmini-flow/flow/platforms/nangate45/lib/NangateOpenCellLibrary_typical.lib
+abc -liberty /home/wangduo/gemmini-flow/flow/platforms/nangate45/lib/NangateOpenCellLibrary_typical.lib
+opt_clean -purge
+write_verilog -noexpr -nodec -noattr /home/wangduo/project/SpecLLMDSA/results/bb_pe_int8.v
+
+# Step 1b: mspe_cell
+design -reset
+read_verilog -sv /home/wangduo/project/SpecLLMDSA/rtl/mspe_cell.v
+hierarchy -top mspe_cell
+proc; techmap
+dfflibmap -liberty /home/wangduo/gemmini-flow/flow/platforms/nangate45/lib/NangateOpenCellLibrary_typical.lib
+abc -liberty /home/wangduo/gemmini-flow/flow/platforms/nangate45/lib/NangateOpenCellLibrary_typical.lib
+opt_clean -purge
+write_verilog -noexpr -nodec -noattr /home/wangduo/project/SpecLLMDSA/results/bb_mspe_cell.v
+
+# ═══════════════════════════════════════════════════════════
+# Phase 2: Top-level synthesis
+# ═══════════════════════════════════════════════════════════
+
+design -reset
+
+# Load pre-synthesized blackboxes
+read_verilog -lib /home/wangduo/project/SpecLLMDSA/results/bb_fp32_mul.v
+read_verilog -lib /home/wangduo/project/SpecLLMDSA/results/bb_fp32_add.v
+read_verilog -lib /home/wangduo/project/SpecLLMDSA/results/bb_fp32_exp.v
+read_verilog -lib /home/wangduo/project/SpecLLMDSA/results/bb_fp32_gelu.v
+read_verilog -lib /home/wangduo/project/SpecLLMDSA/results/bb_fp32_sqrt.v
+read_verilog -lib /home/wangduo/project/SpecLLMDSA/results/bb_pe_int8.v
+read_verilog -lib /home/wangduo/project/SpecLLMDSA/results/bb_mspe_cell.v
+
+# SRAM blackbox stub (scratchpad_1024x128 — has real LEF macro)
+# quantify_buffer_sram — behavioral, treated as blackbox for synthesis
+read_verilog -lib /home/wangduo/project/SpecLLMDSA/rtl/scratchpad_1024x128_freepdk45.v
+read_verilog -lib /home/wangduo/project/SpecLLMDSA/rtl/quantify_buffer_sram.v
+
+# Read all DSA RTL (with SystemVerilog frontend for +: support)
+# Note: use read_verilog -sv which tolerates #(DELAY) timing controls
+# If +: constructs fail, switch to read_slang --ignore-unknown-modules
+read_verilog -sv \
+    -I/home/wangduo/project/SpecLLMDSA/rtl \
+    /home/wangduo/project/SpecLLMDSA/rtl/systolic_array_int8.v \
+    /home/wangduo/project/SpecLLMDSA/rtl/mspe_array_64x64.v \
+    /home/wangduo/project/SpecLLMDSA/rtl/quan_red_pipe.v \
+    /home/wangduo/project/SpecLLMDSA/rtl/quantify_engine.v \
+    /home/wangduo/project/SpecLLMDSA/rtl/vector_unit.v \
+    /home/wangduo/project/SpecLLMDSA/rtl/dsa_controller.v \
+    /home/wangduo/project/SpecLLMDSA/rtl/tl_slave_if.v \
+    /home/wangduo/project/SpecLLMDSA/rtl/specLLM_dsa_top.v
+
+hierarchy -top specLLM_dsa_top
+proc; check; opt -fast
+
+# Keep hierarchy on compute modules to prevent ABC from:
+#   1. Optimizing away SRAM-connected logic across blackbox boundaries
+#   2. SAT explosion across hundreds of FP32 instances
+keep_hierarchy mspe_array_64x64 systolic_array_int8
+keep_hierarchy quan_red_pipe quantify_engine vector_unit
+keep_hierarchy dsa_controller tl_slave_if
+
+# Liberty mapping
+read_liberty -lib /home/wangduo/gemmini-flow/flow/platforms/nangate45/lib/NangateOpenCellLibrary_typical.lib
+techmap; opt -fast
+
+# ABC optimization with liberty (blackbox-safe: -fast avoids deep SAT)
+abc -liberty /home/wangduo/gemmini-flow/flow/platforms/nangate45/lib/NangateOpenCellLibrary_typical.lib -fast
+opt_clean -purge
+
+# Area report
+stat -liberty /home/wangduo/gemmini-flow/flow/platforms/nangate45/lib/NangateOpenCellLibrary_typical.lib
+
+# Write output
+write_verilog -noattr -nohex \
+    /home/wangduo/project/SpecLLMDSA/results/1_synth_dsa.v

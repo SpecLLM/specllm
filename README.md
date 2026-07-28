@@ -1,0 +1,1 @@
+This is a RTL implement about SpecLLM DSA for K-quant high-efficienty forwarding in LLM speculative decoding. DSA includes MsPE, QuanRedPipe, QuantifyEngine, and so on.
