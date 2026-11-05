@@ -1,17 +1,17 @@
 # floorplan_dsa.tcl — DSA internal floorplan + GPL
-# Reference: /home/wangduo/project/sparsenn/cpu_st_top/st_v20/floorplan_v22.tcl
+# Reference: /home/user/project/sparsenn/cpu_st_top/st_v20/floorplan_v22.tcl
 #
 # Layout: 3-row structure (sparsenn v22 pattern)
 #   Row 1 (top):    Weight SRAM (8) + Activation SRAM (8) — 16 macros in 2 rows
-#   Row 2 (middle): Compute (MsPE + INT8 PE + QuanRedPipe + QuantE + VecUnit + Ctrl)
-#   Row 3 (bottom): Accumulator SRAM (8) + Quantify Buffer
+#   Row 2 (middle): Compute (MsPE + FP16 PE + QuanRedPipe + QuantE + VecUnit + Ctrl)
+#   Row 3 (bottom): Accumulator SRAM (16) + Quantify Buffer
 
-source /home/wangduo/gemmini-flow/flow/scripts/util.tcl
+source /home/user/gemmini-flow/flow/scripts/util.tcl
 
-set lef_dir    /home/wangduo/gemmini-flow/flow/platforms/nangate45/lef
-set lib_dir    /home/wangduo/gemmini-flow/flow/platforms/nangate45/lib
-set results_dir /home/wangduo/project/SpecLLMDSA/results
-set scratchpad_lef /home/wangduo/project/sparsenn/cpu_st_top/st_block_hier/scratchpad_1024x128_freepdk45.lef
+set lef_dir    /home/user/gemmini-flow/flow/platforms/nangate45/lef
+set lib_dir    /home/user/gemmini-flow/flow/platforms/nangate45/lib
+set results_dir /home/user/project/SpecLLMDSA/results
+set scratchpad_lef /home/user/project/sparsenn/cpu_st_top/st_block_hier/scratchpad_1024x128_freepdk45.lef
 
 # ── Read technology ──
 read_lef $lef_dir/NangateOpenCellLibrary.tech.lef
@@ -32,12 +32,12 @@ set SRAM_H   380.715
 set GAP      20
 set MARGIN   20
 
-# Die: generous initial estimate, tighten after area report
-# Active: ~7.9 mm² (3.7 stdcell + 4.2 SRAM), target ~55% density
+# Signoff: design area 13.84 mm² (13.75 macro + 0.086 logic)
+# Die: 4200×4300 um = 18.06 mm² → ~76.6% design occupancy
 set DIE_X0  0
 set DIE_Y0  0
-set DIE_X1  5000
-set DIE_Y1  3500
+set DIE_X1  4200
+set DIE_Y1  4300
 
 initialize_floorplan \
     -die_area  "$DIE_X0 $DIE_Y0 $DIE_X1 $DIE_Y1" \
@@ -109,15 +109,19 @@ foreach inst $all_row1_srams {
 
 # ═══════════════════════════════════════════════════════════
 # Row 3 (bottom): Accumulator SRAMs + Quantify Buffer
-#   8 acc + 1 buf = 9 macros → 1 row
+#   16 acc + 1 buf = 17 macros → 3 rows × 8 columns
 # ═══════════════════════════════════════════════════════════
 
 set row3_y [expr {$MARGIN}]
+set row3_cols 8
 set row3_srams [concat $acc_srams $buf_srams]
 set idx 0
 foreach inst $row3_srams {
-    set sx [expr {$MARGIN + $idx * ($SRAM_W + $GAP)}]
-    place_cell -inst_name $inst -origin "$sx $row3_y" -status FIXED
+    set col [expr {$idx % $row3_cols}]
+    set row [expr {$idx / $row3_cols}]
+    set sx [expr {$MARGIN + $col * ($SRAM_W + $GAP)}]
+    set sy [expr {$row3_y + $row * ($SRAM_H + $GAP)}]
+    place_cell -inst_name $inst -origin "$sx $sy" -status FIXED
     incr idx
 }
 

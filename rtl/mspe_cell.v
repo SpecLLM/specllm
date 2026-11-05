@@ -1,115 +1,107 @@
-// mspe_cell.v — Multi-stream Processing Element: Shift-Mux-Add Tree MAC
-// Multiplier-free PE based on DynLogic — replaces physical multiplier with
-// a Shift-Mux-Add tree controlled by the quantized weight.
+// mspe_cell.v — DynLogic Shift-Mux-Add PE, ★ 8-bit 权重输入 / 多 lane
 //
-// Q2K mode (mode=0): 2-bit weight → 4-way MUX on {0, act<<1, act<<2, act<<3}
-//   weight[1:0] = magnitude select, weight[2] = sign bit
-// Q3K mode (mode=1): 3-bit weight → 8-way MUX on signed shifted values
-//   weight[2:0] selects from {+0, +2a, +4a, +8a, -0, -2a, -4a, -8a}
+// ── 与旧版的区别 (重要) ────────────────────────────────────────────────
+//   旧版: `input wire [2:0] weight` —— **只有 1 条 lane**, 是设计文档口径的
+//         1/4 (Q2K) 或 1/2 (Q3K)。文档
+//         (`docs/superpowers/specs/2026-07-07-...-design.md:664`) 写的是
+//             "MsPE Array (64×64) | DynLogic multiplier-free PE array.
+//              Q2K→4-lane, Q3K→2-lane MAC streams"
+//         新版按这个口径实现。
 //
-// Weight-stationary: weight latched on weight_load, activation streams each cycle.
-// Accumulator register enables multi-cycle temporal dot-product accumulation.
-// Systolic dataflow: activation propagates left-to-right, partial sum top-to-bottom.
+// ── 权重字的解释 (8 bit, 内部按 lane 分组) ─────────────────────────────
+//   Q2K (mode=0): 4 × 2 bit → **4 条 lane**, 每条幅值 mag∈{0,1,2,3}
+//                 ⟹ 贡献 {0, a, 2a, 4a}, 4 条相加
+//                 可表示的权重 = 4 个 {0,1,2,4} 之和 ∈ {0,…,16}·a
+//                 ★ 旧版是 {0,2a,4a,8a} —— 2 bit 里塞了 8a (2^3), 且丢掉 2^0,
+//                   导致可表示权重只有偶数 {0,2,…,32}, 累加器 LSB 恒 0。
+//   Q3K (mode=1): 2 × 3 bit → **2 条 lane**, 每 3 bit = {mag[1:0], sign}
+//                 ⟹ 贡献 ±{0, a, 2a, 4a}, 两条相加 (共 8 档 = 3 bit ✓)
+//                 (bit[7] 在 Q3K 下未使用)
+//
+//   乘法器仍然**不存在**: 每条 lane 是一个「移位选择器」(act<<mag),
+//   lane 相和 = 权重 × 激活 —— 即把权重量化成「若干 2 的幂之和」。
+//   8 bit 正好够编码 4 条 (Q2K) 或 2 条 (Q3K) 这样的项。
+//
+// ── 数据流 (与旧版一致) ────────────────────────────────────────────────
+//   weight-stationary: `weight_load` 时锁存 8-bit 权重, 之后保持不变
+//   激活每拍向右传, 部分和每拍向下累加
 
 module mspe_cell (
     input  wire         clk,
     input  wire         rst_n,
 
     // ── Control ──
-    input  wire         mode,            // 0=Q2K (2-bit weight), 1=Q3K (3-bit weight)
-    input  wire         weight_load,     // Latch new stationary weight
-    input  wire         accumulate,      // 1=add to running accumulator, 0=restart accumulation
+    input  wire         mode,            // 0 = Q2K (4×2b), 1 = Q3K (2×3b)
+    input  wire         weight_load,     // 锁存 8-bit 权重 (weight-stationary)
+    input  wire         accumulate,      // 1 = 累加, 0 = 重新开始
 
     // ── Data ──
-    input  wire [7:0]   activation_in,   // INT8 activation from left neighbor
-    input  wire [2:0]   weight,          // Quantized weight (2-bit or 3-bit)
-    input  wire [31:0]  partial_sum_in,  // INT32 partial sum from top neighbor
+    input  wire [7:0]   activation_in,
+    input  wire [7:0]   weight,          // ★ 8 bit / PE (旧版是 [2:0])
+    input  wire [31:0]  partial_sum_in,
 
-    output reg  [7:0]   activation_out,  // To right neighbor (registered)
-    output reg  [31:0]  partial_sum_out  // To bottom neighbor (registered)
+    output reg  [7:0]   activation_out,
+    output reg  [31:0]  partial_sum_out
 );
 
-    // ── Internal registers ──
-    reg  [2:0]  weight_reg;       // Stationary quantized weight
-    reg  [7:0]  activation_reg;   // Pipelined activation
-    reg  [31:0] accum_reg;        // Temporal accumulation register (INT32)
+    reg  [7:0]  weight_reg;       // 8-bit 驻留权重
+    reg  [7:0]  activation_reg;
+    reg  [31:0] accum_reg;
 
-    // ── Shifted activation values for DynLogic tree ──
-    // activation is zero-extended to 11 bits to accommodate act << 3 (max shift = 3)
-    // sh0 = 0, sh1 = act*2, sh2 = act*4, sh3 = act*8
-    wire [10:0] act_ext;
-    wire [10:0] act_sh0, act_sh1, act_sh2, act_sh3;
+    // ── 移位候选 (★ 2026-10-08 修正候选集) ──
+    //   旧: {0, 2a, 4a, 8a} —— 用 2 bit 编码了**指数 1..3**, 既丢掉 2^0 = a,
+    //       又让 8a (= 2^3, 3 bit 的量) 出现在"2-bit 权重"里, 与 Q2K 的位宽不符。
+    //   新: {0, a, 2a, 4a}  —— 2 bit 该有的样子 (0 + 2^0..2^2)。
+    //   ⟹ 奇/小权重 (1, 2, 3 …) 现在表示得出来, 动态范围相应从 0..8 收到 0..4。
+    wire [10:0] act_ext = {3'd0, activation_reg};
+    wire [10:0] sh0 = 11'd0;             // 0      (mag=0)
+    wire [10:0] sh1 = act_ext;           // a      (mag=1)   ★ 旧: act_ext << 1
+    wire [10:0] sh2 = act_ext << 1;      // 2a     (mag=2)   ★ 旧: act_ext << 2
+    wire [10:0] sh3 = act_ext << 2;      // 4a     (mag=3)   ★ 旧: act_ext << 3
 
-    assign act_ext = {3'd0, activation_reg};
-
-    assign act_sh0 = 11'd0;              // 0 * act
-    assign act_sh1 = act_ext << 1;       // 2 * act
-    assign act_sh2 = act_ext << 2;       // 4 * act
-    assign act_sh3 = act_ext << 3;       // 8 * act
-
-    // ── Shift-Mux Tree: magnitude select ──
-    // Q2K: weight[1:0] drives 4-way MUX on {act_sh0, act_sh1, act_sh2, act_sh3}
-    // Q3K: weight[2:0] drives 8-way MUX covering positive and negative values
-    reg  [10:0] mux_magnitude;  // Unsigned magnitude from MUX tree
-    reg         mux_sign;       // Sign from weight MSB (1 = negative)
-
-    always @(*) begin
-        if (!mode) begin
-            // ── Q2K mode: 4-way MUX on weight[1:0], sign from weight[2] ──
-            case (weight_reg[1:0])
-                2'd0:    mux_magnitude = act_sh0;
-                2'd1:    mux_magnitude = act_sh1;
-                2'd2:    mux_magnitude = act_sh2;
-                2'd3:    mux_magnitude = act_sh3;
-                default: mux_magnitude = act_sh0;
+    // ── 一条 lane: 2-bit 幅值选择 + 可选符号 ──
+    function signed [12:0] lane_mac;
+        input [1:0] mag;
+        input       sgn;
+        reg   [10:0] m;
+        begin
+            case (mag)
+                2'd0:    m = sh0;
+                2'd1:    m = sh1;
+                2'd2:    m = sh2;
+                default: m = sh3;
             endcase
-            mux_sign = weight_reg[2];
-        end else begin
-            // ── Q3K mode: 8-way MUX on weight[2:0] ──
-            // Symmetric quantization: MSB encodes sign,
-            // lower 2 bits encode magnitude from {act_sh0, act_sh1, act_sh2, act_sh3}
-            case (weight_reg[2:0])
-                3'd0:    begin mux_magnitude = act_sh0; mux_sign = 1'b0; end  // +0
-                3'd1:    begin mux_magnitude = act_sh1; mux_sign = 1'b0; end  // +2a
-                3'd2:    begin mux_magnitude = act_sh2; mux_sign = 1'b0; end  // +4a
-                3'd3:    begin mux_magnitude = act_sh3; mux_sign = 1'b0; end  // +8a
-                3'd4:    begin mux_magnitude = act_sh0; mux_sign = 1'b1; end  // -0
-                3'd5:    begin mux_magnitude = act_sh1; mux_sign = 1'b1; end  // -2a
-                3'd6:    begin mux_magnitude = act_sh2; mux_sign = 1'b1; end  // -4a
-                3'd7:    begin mux_magnitude = act_sh3; mux_sign = 1'b1; end  // -8a
-                default: begin mux_magnitude = act_sh0; mux_sign = 1'b0; end
-            endcase
+            lane_mac = sgn ? -{2'b00, m} : {2'b00, m};
         end
-    end
+    endfunction
 
-    // ── Sign handling: produce 12-bit signed product ──
-    wire [11:0] signed_product;
-    assign signed_product = mux_sign ? -{1'b0, mux_magnitude}
-                                     :  {1'b0, mux_magnitude};
+    // ── Q2K: 4 条 lane, 每 2 bit 一个无符号幅值 ──
+    wire signed [12:0] q2k0 = lane_mac(weight_reg[1:0], 1'b0);
+    wire signed [12:0] q2k1 = lane_mac(weight_reg[3:2], 1'b0);
+    wire signed [12:0] q2k2 = lane_mac(weight_reg[5:4], 1'b0);
+    wire signed [12:0] q2k3 = lane_mac(weight_reg[7:6], 1'b0);
 
-    // Sign-extend to 32 bits for INT32 accumulation
-    wire [31:0] product_32;
-    assign product_32 = {{20{signed_product[11]}}, signed_product};
+    // ── Q3K: 2 条 lane, 每 3 bit = {mag[1:0], sign} ──
+    wire signed [12:0] q3k0 = lane_mac(weight_reg[1:0], weight_reg[2]);
+    wire signed [12:0] q3k1 = lane_mac(weight_reg[4:3], weight_reg[5]);
 
-    // ── Systolic partial sum: psum_in + product ──
-    wire [31:0] psum_next;
-    assign psum_next = $signed(partial_sum_in) + $signed(product_32);
+    // ── lane 求和 (= 「权重 × 激活」的无乘法器近似) ──
+    wire signed [14:0] prod_sum = mode
+        ? (q3k0 + q3k1)                                  // 2 lane
+        : (q2k0 + q2k1 + q2k2 + q2k3);                   // 4 lane
+    wire signed [31:0] product_32 = {{17{prod_sum[14]}}, prod_sum};
 
-    // ── Temporal accumulator: running dot product across cycles ──
-    wire [31:0] accum_next;
-    assign accum_next = accumulate ? ($signed(accum_reg) + $signed(product_32))
-                                    : product_32;
+    // ── Systolic 部分和 + 时间累加 ──
+    wire signed [31:0] psum_next  = $signed(partial_sum_in) + product_32;
+    wire signed [31:0] accum_next = accumulate ? ($signed(accum_reg) + product_32)
+                                               : product_32;
 
     // ── Pipeline registers ──
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            weight_reg     <= 3'd0;
-            activation_reg <= 8'd0;
-            accum_reg      <= 32'd0;
+            weight_reg <= 8'd0; activation_reg <= 8'd0; accum_reg <= 32'd0;
         end else begin
-            if (weight_load)
-                weight_reg <= weight;
-
+            if (weight_load) weight_reg <= weight;       // weight-stationary: 只锁一次
             activation_reg <= activation_in;
             accum_reg      <= accum_next;
         end
@@ -118,8 +110,7 @@ module mspe_cell (
     // ── Output registers ──
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            activation_out  <= 8'd0;
-            partial_sum_out <= 32'd0;
+            activation_out <= 8'd0; partial_sum_out <= 32'd0;
         end else begin
             activation_out  <= activation_reg;
             partial_sum_out <= psum_next;

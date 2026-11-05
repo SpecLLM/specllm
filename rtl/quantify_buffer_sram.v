@@ -1,5 +1,5 @@
 // quantify_buffer_sram.v — Behavioral SRAM for Quantify Engine buffer
-// 128 depth × 1024 width (64 channels × 16-bit FP16)
+// 128 depth × 1024 width (16 channels × 16-bit FP16)
 //
 // Instantiated at top level for hierarchical synthesis compatibility.
 // Replaceable with real SRAM macro via blackbox surgery flow.

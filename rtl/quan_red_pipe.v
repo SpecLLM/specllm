@@ -1,12 +1,12 @@
-// quan_red_pipe.v — 64-channel mixed-precision fusion pipeline
+// quan_red_pipe.v — N-channel mixed-precision fusion pipeline (default 16)
 // Pipe 2 of QuanRedPipe: intercepts INT32 partial sums and applies
 // block-level scaling (w_scale / w_bias) and superblock-level adjustments
 // (w_sup_scale / w_sup_bias) in a 2-cycle pipeline.
 //
 // Clever pre-computation: broadcast w_scale, w_bias, w_sup_scale, w_sup_bias
 // are combined into a single effective scale+bias pair in Stage 1, then each
-// of the 64 channels needs only one fp32_mul + one fp32_add in Stage 2.
-// This saves 128 FP ops per cycle vs. the naive 4-op-per-channel approach.
+// of the N_CHAN channels needs only one fp32_mul + one fp32_add in Stage 2.
+// This saves 2×N_CHAN FP ops per cycle vs. the naive 4-op-per-channel approach.
 
 `include "sparsenn_params.vh"
 
@@ -17,7 +17,7 @@ module quan_red_pipe #(
     input  wire                      rst_n,
 
     // ── Data inputs ──
-    input  wire [N_CHAN-1:0][`FP32_WIDTH-1:0] partial_sums_in,  // 64 INT32 partial sums (stored as FP32-sized words)
+    input  wire [N_CHAN-1:0][`FP32_WIDTH-1:0] partial_sums_in,  // N_CHAN INT32 partial sums (stored as FP32-sized words)
     input  wire                      valid_in,
 
     // ── Block-level parameters (broadcast, change per block) ──
@@ -48,6 +48,7 @@ module quan_red_pipe #(
         reg [4:0] lead_pos;
         reg       found;
         integer   i;
+        reg [54:0] abs_val_shifted;
         begin
             if (int_val == 32'd0) begin
                 int32_to_fp32 = 32'd0;
@@ -76,7 +77,6 @@ module quan_red_pipe #(
                 // we take the slice directly; for lead_pos < 23 we shift.
                 // Use intermediate wire to avoid part-select on expression
                 // (Yosys read_verilog -sv compatibility, ref: sparsenn synth.md)
-                reg [54:0] abs_val_shifted;
                 abs_val_shifted = abs_val << (5'd23 - lead_pos);
                 if (lead_pos >= 5'd23) begin
                     int32_to_fp32[22:0] = abs_val[lead_pos-1 -: 23];
@@ -89,7 +89,7 @@ module quan_red_pipe #(
 
     // ═══════════════════════════════════════════════════════════════
     // Stage 1: combinatorial logic
-    //   (a) INT32 → FP32 for all 64 channels
+    //   (a) INT32 → FP32 for all N_CHAN channels
     //   (b) Pre-compute combined_scale  = w_scale * w_sup_scale
     //   (c) Pre-compute w_bias_sup      = w_bias * w_sup_scale
     // ═══════════════════════════════════════════════════════════════

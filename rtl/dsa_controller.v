@@ -49,6 +49,16 @@ module dsa_controller #(
     output reg  [1:0]               mspe_mode,
     input  wire                     mspe_done,
 
+    // ── MsPE 权重加载 (★ 新增) ──
+    // MsPE 是 **weight-stationary** 的: 权重只在每次 `mspe_start` 时锁进 PE 寄存器,
+    // 之后整个计算相位都不再读。所以 8192 bit 的权重 tile 不需要"每拍 8192 bit"的
+    // SRAM 带宽 —— 用**寄存器缓冲**分 8 拍从 wt SRAM 宽读灌满即可。
+    //   一拍宽读 = 8 scratchpad × 128 b = 1024 b  ⟹ 8 拍灌满 8192 b
+    //   子模块加载 FSM 在 load_req 之后保持 wt_loading 8 拍, 再花 1 拍清标志
+    //   ⟹ 控制器在本状态等 **9 拍**, 然后才进 S_COMPUTE_MSPS 拉 mspe_start。
+    output reg                      mspe_wt_load_req,   // 1 拍脉冲, 启动宽读
+    output reg  [15:0]              mspe_wt_base_addr,  // 本 tile 在 wt SRAM 的起始行
+
 
     output reg                      quan_red_pipe_start,
     input  wire                     quan_red_pipe_done,
@@ -88,6 +98,18 @@ module dsa_controller #(
     localparam S_VECTOR          = 4'd7;
     localparam S_STORE_RESULTS   = 4'd8;
     localparam S_DONE            = 4'd9;
+    localparam S_MSPS_WLOAD      = 4'd11;   // ★ 新增: MsPE 权重 8 拍宽读 → 寄存器缓冲
+
+    // ── MsPE 权重加载计数器 ──
+    //   子模块 FSM: load_req 之后 wt_loading 保持 8 拍 (cnt 0..7), 第 8 拍清标志
+    //   ⟹ 控制器从拉 load_req 到确认加载完, 一共等 9 拍
+    localparam WT_LOAD_CYCLES = 5'd9;
+    reg  [4:0] wt_load_cnt;
+    wire wt_load_cnt_done = (wt_load_cnt >= WT_LOAD_CYCLES);
+    // 一个权重 tile = 32×32×8b = 8192 b = 8 行 × 8 scratchpad
+    // ⚠️ K 方向的循环尚未实现 (一次调用只算一个 tile), 所以 base 恒 0;
+    //    将来加 K 循环时, 每完成一个 tile 就 +8。
+    localparam WT_TILE_ROWS = 16'd8;
 
     // ── DMA target encoding ──
     localparam DMA_TARG_WEIGHT = 2'd0;
@@ -135,6 +157,10 @@ module dsa_controller #(
 
             S_QUANTIFY:
                 if (quantify_engine_done)
+                    next_state = S_MSPS_WLOAD;      // ★ 先去加载权重, 再算
+
+            S_MSPS_WLOAD:
+                if (wt_load_cnt_done)
                     next_state = S_COMPUTE_MSPS;
 
             S_COMPUTE_MSPS:
@@ -187,6 +213,9 @@ module dsa_controller #(
             // ── Sub-module starts ──
             mspe_start            <= 1'b0;
             mspe_mode             <= 2'd0;
+            mspe_wt_load_req      <= 1'b0;      // ★
+            mspe_wt_base_addr     <= 16'd0;     // ★
+            wt_load_cnt           <= 5'd0;      // ★
             quan_red_pipe_start   <= 1'b0;
             quantify_engine_start <= 1'b0;
             vector_unit_start     <= 1'b0;
@@ -207,6 +236,7 @@ module dsa_controller #(
             // ── Default deassertions (pulsed signals) ──
             dma_start            <= 1'b0;
             mspe_start           <= 1'b0;
+            mspe_wt_load_req     <= 1'b0;       // ★ 1 拍脉冲
             quan_red_pipe_start  <= 1'b0;
             quantify_engine_start <= 1'b0;
             vector_unit_start    <= 1'b0;
@@ -281,6 +311,27 @@ module dsa_controller #(
                     // provide basic read-enable for SRAM window
                     sram_act_rd_en   <= 1'b1;
                     sram_act_rd_addr <= 16'd0;  // base address
+                end
+
+                // ──────────────────────────────────────────────
+                // MSPS_WLOAD: MsPE 权重 8 拍宽读 → 8192-bit 寄存器缓冲 ★ 新增
+                // ──────────────────────────────────────────────
+                //   weight-stationary ⟹ 权重不需要每拍 8192 bit 的 SRAM 带宽,
+                //   分 8 拍灌进缓冲即可 (稳态端口占用 8/64 = 12.5%)。
+                //   本状态: 第 1 拍拉 load_req, 之后等 9 拍让子模块加载完。
+                S_MSPS_WLOAD: begin
+                    if (!phase_started) begin
+                        mspe_wt_load_req <= 1'b1;       // 1 拍脉冲, 启动宽读
+                        mspe_wt_base_addr <= 16'd0;     // K 循环未实现, base 恒 0
+                        wt_load_cnt      <= 5'd0;
+                        phase_started    <= 1'b1;
+                    end else begin
+                        mspe_wt_load_req <= 1'b0;       // 脉冲只持续一拍
+                        if (!wt_load_cnt_done)
+                            wt_load_cnt <= wt_load_cnt + 5'd1;
+                    end
+                    // 加载期间让 wt SRAM 处于宽读状态 (csb 会把 8 个一起使能)
+                    sram_weight_rd_en   <= 1'b1;
                 end
 
                 // ──────────────────────────────────────────────

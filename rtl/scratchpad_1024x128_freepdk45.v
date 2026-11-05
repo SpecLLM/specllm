@@ -16,7 +16,7 @@ module scratchpad_1024x128_freepdk45(
   parameter RAM_DEPTH = 1 << ADDR_WIDTH;
   // FIXME: This delay is arbitrary.
   parameter DELAY = 3 ;
-  parameter VERBOSE = 1 ; //Set to 0 to only display warnings
+  parameter VERBOSE = 0 ; //Set to 0 to only display warnings (verilator: 默认关, 免 %m)
   parameter T_HOLD = 1 ; //Delay to hold dout value after posedge. Value is arbitrary
 
 `ifdef USE_POWER_PINS
@@ -47,9 +47,9 @@ module scratchpad_1024x128_freepdk45(
     din0_reg = din0;
     #(T_HOLD) dout0 = 128'bx;
     if ( !csb0_reg && web0_reg && VERBOSE )
-      $display($time," Reading %m addr0=%b dout0=%b",addr0_reg,mem[addr0_reg]);
+      $display($time," Reading addr0=%b dout0=%b",addr0_reg,mem[addr0_reg]);
     if ( !csb0_reg && !web0_reg && VERBOSE )
-      $display($time," Writing %m addr0=%b din0=%b",addr0_reg,din0_reg);
+      $display($time," Writing addr0=%b din0=%b",addr0_reg,din0_reg);
   end
 
 

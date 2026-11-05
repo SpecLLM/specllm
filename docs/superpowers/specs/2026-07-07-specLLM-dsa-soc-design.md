@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-08 (updated)
 **Status:** RTL Complete
-**Reference:** `design.tex` (SpecLLM NPU-Q architecture), `/home/wangduo/project/sparsenn/` (SoC integration pattern)
+**Reference:** `design.tex` (SpecLLM NPU-Q architecture), `/home/user/project/sparsenn/` (SoC integration pattern)
 
 ---
 
@@ -31,21 +31,22 @@ Pipeline-based speculative LLM decoding:
 
 ### 2.1 Sub-Module List
 
-| Module | Description | StdCell (mm²) | SRAM (mm²) |
-|--------|-------------|:-----------:|:----------:|
-| **MsPE Array (64×64)** | DynLogic multiplier-free PE array. Q2K→4-lane, Q3K→2-lane MAC streams | ~2.2 | 0 |
-| **INT8 PE Array (32×32)** | Standard INT8 systolic array for dense matmul | ~0.72 | 0 |
-| **QuanRedPipe** | 64-ch FP32 MAC-Adder Tree. Fuses block/superblock scale+bias dequant into MAC output (2-cycle pipeline) | ~0.5 | 0 |
-| **Vector Unit (32-lane)** | FP32 SIMD: ReLU, Softmax, LayerNorm, GELU, VecMul, VecScale, VecSqrt, VecAdd | ~0.025 | 0 |
-| **Quantify Engine** | 5-state FSM pipeline: COLLECT→SCALE→DRAIN. O(log N) temporal max reduction + shift/LUT scale generation. External buffer SRAM interface | ~0.15 | 0 |
-| **Controller + DMA + TL IF** | 10-state FSM + TileLink-UL slave (single-outstanding) + DMA engine (LOAD/STORE) + CSR register file (12 regs) | ~0.1 | 0 |
-| **Weight SRAM (8×)** | Q2K/Q3K weights + scales. scratchpad_1024x128 macros | 0 | ~1.4 |
-| **Activation SRAM (8×)** | Q8K activations, dual-purpose (DMA write + Quantify Engine write) | 0 | ~1.4 |
-| **Accumulator SRAM (8×)** | FP32 partial sums, pipeline writeback + DMA readback | 0 | ~1.4 |
-| **Quantify Buffer SRAM (1×)** | 128×1024 behavioral SRAM for Quantify Engine intermediate storage | 0 | — |
-| **Total** | | **~3.70** | **~4.2** |
+| Component | Description | Area (mm²) | Share of die |
+|-----------|-------------|:----------:|:------------:|
+| **FP16 PE Array (32×32)** | Dense FP16 systolic array, 1024 PEs | 5.954 | 33.0% |
+| **SRAM Bank (32 scratchpad)** | 8 wt + 8 act + 16 acc, 512 KB (scratchpad_1024x128, 16 KB each) | 5.510 | 30.5% |
+| **MsPE Array (32×32)** | DynLogic multiplier-free PE array, Q2K 4-lane / Q3K 2-lane | 1.850 | 10.2% |
+| **Quantify Buffer SRAM** | 128 × 1024 b | 0.225 | 1.2% |
+| **Vector (unit + reg)** | 32-lane / 1024-b FP32 SIMD + register bank, including its fp32 macros | 0.156 | 0.87% |
+| **QuanRedPipe** | 32-ch FP32 MAC-adder tree, 2-cycle pipeline, including its fp32 macros | 0.129 | 0.71% |
+| **Quantify Engine** | 5-state FSM pipeline: COLLECT→SCALE→DRAIN | 0.007 | 0.04% |
+| **Other** | Filler/tap/endcap, empty space, TL slave, controller, top-level glue | 4.230 | 23.4% |
+| **Total (die)** | | **18.06** | **100%** |
 
-**Total active area:** ~7.9 mm² | **DSA die:** ~5000×3500 um ≈ 17.5 mm²
+Design content (macros + logic) = **13.84 mm²** in an 18.06 mm² die (78.6%
+utilization); the remaining 4.23 mm² is filler/empty space.
+
+**Design area:** 13.84 mm² | **DSA die:** 4200×4300 um = 18.06 mm²
 
 ### 2.2 Data Flow (verified, all paths connected)
 
@@ -55,12 +56,10 @@ Pipeline-based speculative LLM decoding:
 FP16 Act SRAM ──→ Quantify Engine ──→ quant_q8_out → Act SRAM (writeback to addr 0)
                           │                        (overwrites FP16 input with Q8)
                           │
-                 Act SRAM ──→ MsPE Array (64×64 DynLogic) ──┐
-                 Act SRAM ──→ INT8 PE Array (32×32)    ──┐  │
-                                                          │  │
-                        ┌─────────────────────────────────┘  │
-                        │  (mux: int8_running ? INT8 : MsPE) │
-                        │                                    │
+                 Act SRAM ──→ MsPE Array (32×32 DynLogic) ──┐
+                                                          │
+                        ┌─────────────────────────────────┘
+                        │
                         └──→ QuanRedPipe ──→ VectorUnit ──→ Acc SRAM
                                  ↑                              │
                            qrp_w_scale                    DMA readback
@@ -69,11 +68,11 @@ FP16 Act SRAM ──→ Quantify Engine ──→ quant_q8_out → Act SRAM (wri
 
 1. DMA loads weights/activations via TL bus into Weight/Act SRAMs
 2. Quantify Engine reads FP16 from Act SRAM → quantizes to Q8 → writes back to Act SRAM
-3. MsPE (or INT8) reads weights + Q8 activations → computes INT32 partial sums
+3. MsPE reads weights + Q8 activations → computes INT32 partial sums
 4. QuanRedPipe fuses INT32→FP32 conversion + scale/bias dequant (2-cycle pipeline)
 5. Vector Unit applies element-wise post-processing (ReLU/LayerNorm/etc.)
 6. Results written to Acc SRAM → DMA-read back to host via TL bus
-7. Done detection via cycle counters (MsPE: 128 cycles, INT8: 64 cycles)
+7. Done detection via cycle counters (MsPE / FP16: 64 cycles)
 
 ### 2.3 SRAM Topology (all at top level)
 
@@ -83,24 +82,27 @@ All SRAM macros instantiated in `specLLM_dsa_top.v` — no sub-module contains m
 |-----------|--------|:----:|:-----:|:-----:|-------|
 | Weight | scratchpad_1024x128 | 8 | 128b | 1024 | DMA write only |
 | Activation | scratchpad_1024x128 | 8 | 128b | 1024 | DMA write + Quantify Engine write (muxed) |
-| Accumulator | scratchpad_1024x128 | 8 | 128b | 1024 | Pipeline writeback + DMA readback |
+| Accumulator | scratchpad_1024x128 | 16 | 128b | 1024 | Ping-pong pairs; pipeline writeback + DMA readback |
 | Quantify Buffer | quantify_buffer_sram | 1 | 1024b | 128 | Behavioral, replaceable via surgery flow |
 
-This keeps sub-modules macro-free for clean hierarchical synthesis.
+32 scratchpad macros (512 KB) + 1 buffer macro. This keeps sub-modules
+macro-free for clean hierarchical synthesis.
 
 ---
 
 ## 3. SoC Top-Level Architecture
 
-### 3.1 Module Sizes
+### 3.1 Module Sizes (2026-10-29 signoff)
 
-| Module | Size (um) | Area (mm²) | Source |
-|--------|:---------:|:----------:|--------|
-| NPU-Q DSA | 5000 × 3500 | 17.5 | New (estimated) |
-| RocketTile ×4 | 1000 × 1000 | 1.0 each | Reuse sparsenn LEF |
-| L2 Cache | 4000 × 1000 | 4.0 | Reuse sparsenn LEF |
-| SystemBus | 500 × 500 | 0.25 | Reuse sparsenn LEF |
-| **Total** | 5400 × 5500 | **~29.7** | |
+| Module | Die size (µm) | Die area (mm²) | Design area (mm²) | Utilization |
+|--------|:-------------:|:--------------:|:-----------------:|:-----------:|
+| NPU-Q DSA | 4200 × 4300 | 18.06 | 13.837 | 78.6% |
+| RocketTile ×4 | 1900 × 960 | 2.70 each | 1.984 each | 77.3% |
+| L2 Cache | — | 7.39 | 1.630 | 22.7% |
+| SystemBus | — | 0.09 | 0.009 | 10.7% |
+| **SoC top** | **8600 × 7150** | **61.49** | **32.864** | **54.0%** |
+
+Source: ORFS signoff report (2026-10-29).
 
 ### 3.2 Top-Level Floorplan
 
@@ -108,7 +110,7 @@ This keeps sub-modules macro-free for clean hierarchical synthesis.
 +-------------------------------------------------------+
 |                                                        |
 |                 NPU-Q DSA                              |
-|                 5000 x 3500 um                         |
+|                 4200 x 4300 um                         |
 |                                                        |
 +----------------------------+--------+------+------+---+
 | L2 Cache (4000 x 1000 um) |  SB    | RT0  | RT1  |   |
@@ -119,7 +121,7 @@ This keeps sub-modules macro-free for clean hierarchical synthesis.
                                              1000 | 1000 |
                                              x1000| x1000|
                                              +-----+-----+
-Total die: ~5400 x 5500 um ≈ 29.7 mm²
+Total die: 8600 x 7150 um ≈ 61.49 mm²
 ```
 
 ### 3.3 Interconnect Topology
@@ -141,9 +143,9 @@ Total die: ~5400 x 5500 um ≈ 29.7 mm²
 
 ```
 +-----------------------------------+-------------------+
-| MsPE Array (64×64 DynLogic)      | INT8 PE Array     |
-| ~1700 x 1500 um                  | 32×32             |
-|                                   | ~700 x 1000 um    |
+| MsPE Array (32×32 DynLogic)      | FP16 Array        |
+| 1360 x 1360 um                   | 32×32             |
+|                                   | 2440 x 2440 um    |
 +-----------------------------------+                   |
 | QuanRedPipe (FP32 Fusion)        |                   |
 | ~300 x 1700 um                   +-------------------+
@@ -152,48 +154,55 @@ Total die: ~5400 x 5500 um ≈ 29.7 mm²
 | Ctrl/DMA/TL IF (300x300)         +---------+ 300x300 |
 +----------------------------------+         +---------+
 |                                                       |
-|   SRAM Bank (25 macros)                               |
-|   8wt + 8act + 8acc (scratchpad) + 1 quantify_buffer  |
-|   3000 x 2000 um                                      |
+|   SRAM Bank (33 macros)                               |
+|   8wt + 8act + 16acc (scratchpad) + 1 quantify_buffer |
+|   3917 x 2435 um  (512 KB + 16 KB)                    |
 +-------------------------------------------------------+
-DSA die: ~5000 x 3500 um
+DSA die: 4200 x 4300 um = 18.06 mm²
 ```
 
 ---
 
 ## 4. RTL Implementation (Complete)
 
-### 4.1 File Inventory (20 files, 3376 lines)
+### 4.1 File Inventory (26 files, 4490 lines)
 
 ```
 rtl/
-├── specLLM_dsa_top.v               (614 lines)  Top-level integration
-├── dsa_controller.v                (386 lines)  10-state sequence FSM
-├── tl_slave_if.v                   (462 lines)  TileLink-UL slave + CSR + DMA
-├── mspe_cell.v                     (129 lines)  DynLogic Shift-Mux-Add Tree PE
-├── mspe_array_64x64.v              ( 95 lines)  64×64 MsPE systolic grid
-├── quan_red_pipe.v                 (206 lines)  64-ch mixed-precision fusion
+├── specLLM_dsa_top.v               (706 lines)  Top-level integration
+├── dsa_controller.v                (435 lines)  10-state sequence FSM
+├── dsa_params.vh                   ( 45 lines)  DSA parameter defines
+├── sparsenn_params.vh              ( 54 lines)  Base parameter defines
+├── mspe_cell.v                     (120 lines)  DynLogic Shift-Mux-Add Tree PE
+├── mspe_array_32x32.v              (160 lines)  32×32 MsPE systolic grid
+├── quan_red_pipe.v                 (210 lines)  32-ch mixed-precision fusion
 ├── quantify_engine.v               (505 lines)  FP16→Q8K quantization pipeline
 ├── quantify_buffer_sram.v          ( 32 lines)  128×1024 behavioral SRAM
-├── systolic_array_int8.v           ( 97 lines)  Parameterized INT8 systolic array
-├── pe_int8.v                       ( 68 lines)  INT8 MAC PE
-├── vector_unit.v                   (436 lines)  32-lane FP32 SIMD
+├── vector_unit.v                   (454 lines)  32-lane FP32 SIMD
+├── vector_reg.v                    (119 lines)  Vector register file
+├── fp16_pe.v                       ( 79 lines)  FP16 processing element
+├── fp16_mul.v                      (112 lines)  FP16 multiplier
+├── fp16_array_32x32.v              ( 99 lines)  32×32 FP16 systolic array
 ├── fp32_add.v                      (139 lines)  FP32 adder
 ├── fp32_mul.v                      ( 82 lines)  FP32 multiplier
 ├── fp32_exp.v                      ( 40 lines)  FP32 exponential
 ├── fp32_gelu.v                     ( 40 lines)  FP32 GELU activation
+├── fp32_recip.v                    ( 33 lines)  FP32 reciprocal
 ├── fp32_sqrt.v                     ( 36 lines)  FP32 square root
 ├── scratchpad_1024x128_freepdk45.v ( 73 lines)  OpenRAM SRAM macro
-├── dsa_params.vh                   ( 37 lines)  DSA parameter defines
-└── sparsenn_params.vh              ( 55 lines)  Base parameter defines
+├── tl_slave_if.v                   (486 lines)  TileLink-UL slave + CSR
+├── tl_master_dma.v                 (111 lines)  Multi-outstanding TL-UL master DMA
+├── tlul_arb4.v                     (102 lines)  4:1 TL-UL round-robin arbiter
+├── tlul_mem_model.v                ( 93 lines)  Pipelined TL-UL DRAM model
+└── dram_model.v                    (125 lines)  Shared DRAM model (BW gate)
 ```
 
 ### 4.2 Module Sources
 
 | Category | Files | Source |
 |----------|-------|--------|
-| New (DSA-specific) | mspe_cell, mspe_array_64x64, quan_red_pipe, quantify_engine, dsa_controller, tl_slave_if, quantify_buffer_sram, dsa_params.vh, specLLM_dsa_top | Written for this project |
-| Ported (sparsenn) | pe_int8, systolic_array_int8, vector_unit, fp32_*, scratchpad, sparsenn_params.vh | Copied from /home/wangduo/project/sparsenn/rtl/ |
+| New (DSA-specific) | mspe_cell, mspe_array_32x32, quan_red_pipe, quantify_engine, dsa_controller, tl_slave_if, tl_master_dma, tlul_arb4, tlul_mem_model, dram_model, quantify_buffer_sram, vector_reg, fp16_*, dsa_params.vh, specLLM_dsa_top | Written for this project |
+| Ported (sparsenn) | vector_unit, fp32_*, scratchpad, sparsenn_params.vh | Copied from /home/user/project/sparsenn/rtl/ |
 
 ### 4.3 Connectivity Verification
 
@@ -217,12 +226,11 @@ All 15 issues from the comprehensive port audit have been resolved:
 |----------|--------|-----------|
 | Bus topology | Single shared TileLink | Reuse sparsenn L2/SB/RT without modification |
 | DSA bus interface | Single TL slave port | Simplest integration, sufficient for CSR + DMA |
-| MsPE size | 64×64 | Match sparsenn INT8 array scale, ~2.2 mm² |
-| INT8 array size | 32×32 | 1/4 of MsPE, for dense matmul fallback |
-| SRAM count | 25 (24 scratchpad + 1 buffer) | 8wt+8act+8acc + quantify buffer |
+| MsPE size | 32×32 | 1024 multi-stream PEs, 1.85 mm² macro area |
+| SRAM count | 33 (32 scratchpad + 1 buffer) | 8wt + 8act + 16acc + quantify buffer |
 | SRAM placement | All at top level | No macros in sub-modules → clean hierarchical synthesis |
-| Vector unit lanes | 32 | 2× sparsenn baseline, suitable for DSA throughput |
-| Done detection | Cycle counters | MsPE: 128 cycles (64+64), INT8: 64 cycles (32+32) |
+| Vector unit lanes | 32 (1024 b) | 2× sparsenn baseline, suitable for DSA throughput |
+| Done detection | Cycle counters | MsPE / FP16: 64 cycles (32+32) |
 | Quantify output | Writeback to Act SRAM | Q8 activations overwrite FP16 input at addr 0 |
 | Quantify scales | Latch → QuanRedPipe mux | Per-channel scales inform dequant step |
 | Integration method | Abstract LEF assembly | Same as sparsenn cpu_st_top flow |

@@ -1,5 +1,5 @@
 // vector_unit.v — Vector processing for softmax, layernorm, ReLU, GELU
-// 16-lane fully parallel architecture.
+// LANES-parameterized fully parallel architecture (32 lanes / 1024 b in this SoC).
 // Each lane has dedicated fp32_add, fp32_mul, fp32_exp, fp32_gelu, fp32_sqrt.
 // Reduction trees (max/sum) are combinational. Shared fp32_recip for post-reduction.
 //
@@ -85,22 +85,24 @@ module vector_unit #(
 
     // ── Reduction tree wires ──
     // Max tree
-    wire [`FP32_WIDTH-1:0] max_l0 [0:7];
-    wire [`FP32_WIDTH-1:0] max_l1 [0:3];
-    wire [`FP32_WIDTH-1:0] max_l2 [0:1];
+    wire [`FP32_WIDTH-1:0] max_l0 [0:15];
+    wire [`FP32_WIDTH-1:0] max_l1 [0:7];
+    wire [`FP32_WIDTH-1:0] max_l2 [0:3];
+    wire [`FP32_WIDTH-1:0] max_l3 [0:1];
     wire [`FP32_WIDTH-1:0] max_result;
 
     // Sum tree
-    wire [`FP32_WIDTH-1:0] sum_l0_out [0:7];
-    wire [`FP32_WIDTH-1:0] sum_l1_out [0:3];
-    wire [`FP32_WIDTH-1:0] sum_l2_out [0:1];
+    wire [`FP32_WIDTH-1:0] sum_l0_out [0:15];
+    wire [`FP32_WIDTH-1:0] sum_l1_out [0:7];
+    wire [`FP32_WIDTH-1:0] sum_l2_out [0:3];
+    wire [`FP32_WIDTH-1:0] sum_l3_out [0:1];
     wire [`FP32_WIDTH-1:0] sum_result;
 
     // Shared recip
     wire [`FP32_WIDTH-1:0] recip_out;
 
     // ═══════════════════════════════════════════════════════════════
-    // Per-lane generate: 16 lanes, each with 5 arithmetic units
+    // Per-lane generate: 32 lanes, each with 5 arithmetic units
     // ═══════════════════════════════════════════════════════════════
 
     genvar g;
@@ -158,59 +160,71 @@ module vector_unit #(
     endgenerate
 
     // ═══════════════════════════════════════════════════════════════
-    // Max reduction tree: 15 comparators, 4 levels, combinational
+    // Max reduction tree: 31 comparators, 5 levels, combinational (32 lanes)
     // ═══════════════════════════════════════════════════════════════
 
     generate
-        // Level 0: 16→8
-        for (g = 0; g < 8; g = g + 1) begin : max_l0_gen
+        // Level 0: 32→16
+        for (g = 0; g < 16; g = g + 1) begin : max_l0_gen
             wire signed [31:0] a_s = $signed({~rf[g*2][31], rf[g*2][30:0]});
             wire signed [31:0] b_s = $signed({~rf[g*2+1][31], rf[g*2+1][30:0]});
             assign max_l0[g] = (a_s > b_s) ? rf[g*2] : rf[g*2+1];
         end
-        // Level 1: 8→4
-        for (g = 0; g < 4; g = g + 1) begin : max_l1_gen
+        // Level 1: 16→8
+        for (g = 0; g < 8; g = g + 1) begin : max_l1_gen
             wire signed [31:0] a_s = $signed({~max_l0[g*2][31], max_l0[g*2][30:0]});
             wire signed [31:0] b_s = $signed({~max_l0[g*2+1][31], max_l0[g*2+1][30:0]});
             assign max_l1[g] = (a_s > b_s) ? max_l0[g*2] : max_l0[g*2+1];
         end
-        // Level 2: 4→2
-        for (g = 0; g < 2; g = g + 1) begin : max_l2_gen
+        // Level 2: 8→4
+        for (g = 0; g < 4; g = g + 1) begin : max_l2_gen
             wire signed [31:0] a_s = $signed({~max_l1[g*2][31], max_l1[g*2][30:0]});
             wire signed [31:0] b_s = $signed({~max_l1[g*2+1][31], max_l1[g*2+1][30:0]});
             assign max_l2[g] = (a_s > b_s) ? max_l1[g*2] : max_l1[g*2+1];
         end
-        // Level 3: 2→1
-        if (1) begin : max_l3_gen
-            wire signed [31:0] a_s = $signed({~max_l2[0][31], max_l2[0][30:0]});
-            wire signed [31:0] b_s = $signed({~max_l2[1][31], max_l2[1][30:0]});
-            assign max_result = (a_s > b_s) ? max_l2[0] : max_l2[1];
+        // Level 3: 4→2
+        for (g = 0; g < 2; g = g + 1) begin : max_l3_gen
+            wire signed [31:0] a_s = $signed({~max_l2[g*2][31], max_l2[g*2][30:0]});
+            wire signed [31:0] b_s = $signed({~max_l2[g*2+1][31], max_l2[g*2+1][30:0]});
+            assign max_l3[g] = (a_s > b_s) ? max_l2[g*2] : max_l2[g*2+1];
+        end
+        // Level 4: 2→1
+        if (1) begin : max_l4_gen
+            wire signed [31:0] a_s = $signed({~max_l3[0][31], max_l3[0][30:0]});
+            wire signed [31:0] b_s = $signed({~max_l3[1][31], max_l3[1][30:0]});
+            assign max_result = (a_s > b_s) ? max_l3[0] : max_l3[1];
         end
     endgenerate
 
     // ═══════════════════════════════════════════════════════════════
-    // Sum reduction tree: 15 fp32_add, 4 levels, combinational
+    // ═══════════════════════════════════════════════════════════════
+    // Sum reduction tree: 31 fp32_add, 5 levels, combinational (32 lanes)
     // ═══════════════════════════════════════════════════════════════
 
     generate
-        // Level 0: 16→8
-        for (g = 0; g < 8; g = g + 1) begin : sum_l0_gen
+        // Level 0: 32→16
+        for (g = 0; g < 16; g = g + 1) begin : sum_l0_gen
             fp32_add u_sum0 (.a(rf[g*2]), .b(rf[g*2+1]), .result(sum_l0_out[g]));
         end
-        // Level 1: 8→4
-        for (g = 0; g < 4; g = g + 1) begin : sum_l1_gen
+        // Level 1: 16→8
+        for (g = 0; g < 8; g = g + 1) begin : sum_l1_gen
             fp32_add u_sum1 (.a(sum_l0_out[g*2]), .b(sum_l0_out[g*2+1]), .result(sum_l1_out[g]));
         end
-        // Level 2: 4→2
-        for (g = 0; g < 2; g = g + 1) begin : sum_l2_gen
+        // Level 2: 8→4
+        for (g = 0; g < 4; g = g + 1) begin : sum_l2_gen
             fp32_add u_sum2 (.a(sum_l1_out[g*2]), .b(sum_l1_out[g*2+1]), .result(sum_l2_out[g]));
         end
-        // Level 3: 2→1
-        if (1) begin : sum_l3_gen
-            fp32_add u_sum3 (.a(sum_l2_out[0]), .b(sum_l2_out[1]), .result(sum_result));
+        // Level 3: 4→2
+        for (g = 0; g < 2; g = g + 1) begin : sum_l3_gen
+            fp32_add u_sum3 (.a(sum_l2_out[g*2]), .b(sum_l2_out[g*2+1]), .result(sum_l3_out[g]));
+        end
+        // Level 4: 2→1
+        if (1) begin : sum_l4_gen
+            fp32_add u_sum4 (.a(sum_l3_out[0]), .b(sum_l3_out[1]), .result(sum_result));
         end
     endgenerate
 
+    // ═══════════════════════════════════════════════════════════════
     // ═══════════════════════════════════════════════════════════════
     // Shared fp32_recip (single-cycle approximation)
     // ═══════════════════════════════════════════════════════════════
@@ -415,10 +429,14 @@ module vector_unit #(
     endgenerate
 
     assign result_out = {
+        out_lane[31], out_lane[30], out_lane[29], out_lane[28],
+        out_lane[27], out_lane[26], out_lane[25], out_lane[24],
+        out_lane[23], out_lane[22], out_lane[21], out_lane[20],
+        out_lane[19], out_lane[18], out_lane[17], out_lane[16],
         out_lane[15], out_lane[14], out_lane[13], out_lane[12],
-        out_lane[11], out_lane[10], out_lane[ 9], out_lane[ 8],
-        out_lane[ 7], out_lane[ 6], out_lane[ 5], out_lane[ 4],
-        out_lane[ 3], out_lane[ 2], out_lane[ 1], out_lane[ 0]
+        out_lane[11], out_lane[10], out_lane[9], out_lane[8],
+        out_lane[7], out_lane[6], out_lane[5], out_lane[4],
+        out_lane[3], out_lane[2], out_lane[1], out_lane[0]
     };
 
     assign result_valid = (state == S_OUTPUT);
