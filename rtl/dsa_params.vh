@@ -9,7 +9,7 @@
 // ── MsPE Array ──
 `define MSPE_ROWS           32
 `define MSPE_COLS           32
-`define MSPE_WEIGHT_BITS      8   // ★ 8-bit 权重字, 内部按 lane 分组 (Q2K: 4×2b / Q3K: 2×3b)
+`define MSPE_WEIGHT_BITS      8   // 8-bit weight word, split into lanes internally (Q2K: 4×2b / Q3K: 2×3b)
 
 // ── FP16 PE Array ──
 `define FP16_PE_ROWS        32
@@ -28,11 +28,11 @@
 // ── SRAM Configuration ──
 `define SRAM_DEPTH         1024   // Words per scratchpad
 `define SRAM_WIDTH          128   // Bits per word
-`define WT_SRAM_COUNT         8   // 权重 bank: 8 × 16 KB = 128 KB
-`define ACT_SRAM_COUNT        8   // 激活 bank: 8 × 16 KB = 128 KB
-`define ACC_SRAM_COUNT       16   // 累加 bank: 16 × 16 KB = 256 KB (2 组 × 8, ping-pong)
-`define ACC_GROUP             8   // 每组 scratchpad 数
-`define SRAM_BANK_COUNT       8   // (旧名, 保留兼容; 新代码请用上面三个)
+`define WT_SRAM_COUNT         8   // Weight bank: 8 × 16 KB = 128 KB
+`define ACT_SRAM_COUNT        8   // Activation bank: 8 × 16 KB = 128 KB
+`define ACC_SRAM_COUNT       16   // Accumulator bank: 16 × 16 KB = 256 KB (2 groups × 8, ping-pong)
+`define ACC_GROUP             8   // Scratchpads per group
+`define SRAM_BANK_COUNT       8   // (legacy name, kept for compatibility; use the three above)
 `define SRAM_ADDR_BITS       10   // log2(SRAM_DEPTH)
 
 // ── TileLink Interface ──

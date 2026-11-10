@@ -1,4 +1,4 @@
-// tlul_arb4_ul: 4→1 TL 轮询仲裁器 (自写), 只仲裁 A/D 通道, N 深 8/主口 + source 重映射
+// tlul_arb4_ul: 4-to-1 TileLink round-robin arbiter, A/D channels only, depth 8 per master + source remapping
 module tlul_arb4_ul (
   input  wire clk,
   input  wire rst_n,
@@ -44,7 +44,7 @@ module tlul_arb4_ul (
   output wire s_d_ready
 );
 
-  // ── N 深: tag 宽 = source 宽 5 (seq 3 bit/主口 → 深 8) + source 重映射 ──
+  // ── N-deep: tag width = 5-bit source (3-bit seq per master → depth 8) + source remapping ──
   reg  [31:0] tag_busy;
   reg  [6:0]  tag_src [0:31];
   reg  [2:0]  seq [0:3];

@@ -43,15 +43,15 @@ module specLLM_dsa_top #(
     output wire                     tl_d_error,
     input  wire                     tl_d_ready,
 
-    // ── 主口 DMA (2026-10-10): DSA 主动访存, 接 SystemBus fbus ──
+    // ── Master DMA (2026-10-10): DSA-initiated memory access, connects to SystemBus fbus ──
     input  wire                     m_dma_start,
-    input  wire                     m_dma_rw,      // 0=读 DRAM, 1=写 DRAM
+    input  wire                     m_dma_rw,      // 0 = read DRAM, 1 = write DRAM
     input  wire [31:0]              m_dma_base_addr,
     input  wire [15:0]              m_dma_n_words,
     output wire                     m_dma_busy,
     output wire                     m_dma_done,
     output wire [63:0]              m_dma_checksum,
-    // TL-UL 主口
+    // TL-UL master port
     output wire                     m_a_valid,
     input  wire                     m_a_ready,
     output wire [2:0]               m_a_opcode,
@@ -109,13 +109,13 @@ module specLLM_dsa_top #(
     wire                     mspe_start;
     wire [1:0]               mspe_mode;
     wire                     mspe_done;
-    // ★ 新增: MsPE 权重加载握手 (由 dsa_controller 驱动, 见权重加载 FSM)
-    wire                     mspe_wt_load_req;    // COMPUTE 相位前拉高, 启动 8 拍宽读
-    wire [15:0]              mspe_wt_base_addr;   // 本 tile 在 wt SRAM 的起始行
-    wire                     mspe_wt_load_busy;   // 阵列回报: 加载中
-    wire [2:0]               mspe_wt_load_idx;    // 阵列输出: 本拍要读第几个字 (0..7)
-    wire [1023:0]            mspe_wt_wide;        // 8 scratchpad 拼成的宽字
-    // 由 dsa_controller 的 S_MSPS_WLOAD 状态驱动 (QUANTIFY → MSPS_WLOAD → COMPUTE_MSPS)
+    // MsPE weight-load handshake (driven by dsa_controller; see the weight-load FSM)
+    wire                     mspe_wt_load_req;    // asserted before COMPUTE to start 8 wide reads
+    wire [15:0]              mspe_wt_base_addr;   // first wt SRAM row of this tile
+    wire                     mspe_wt_load_busy;   // loading in progress, reported by the array
+    wire [2:0]               mspe_wt_load_idx;    // array output: word index to read this cycle (0..7)
+    wire [1023:0]            mspe_wt_wide;        // wide word assembled from 8 scratchpads
+    // Driven by dsa_controller state S_MSPS_WLOAD (QUANTIFY -> MSPS_WLOAD -> COMPUTE_MSPS)
 
     // FP16 Array
     wire                     fp16_array_done;
@@ -160,7 +160,7 @@ module specLLM_dsa_top #(
     wire [DATA_WIDTH-1:0]    dma_sram_acc_rd_data;
 
     // ═══════════════════════════════════════════════════════════════
-    // 前置声明 (iverilog 要求 declaration-before-use; 语义与原文件一致)
+    // Forward declarations (iverilog requires declaration-before-use; semantics unchanged)
     // ═══════════════════════════════════════════════════════════════
     wire [32*32-1:0]         fp16_psums_out;
     reg                      fp16_running;
@@ -170,7 +170,7 @@ module specLLM_dsa_top #(
     wire                     vec_reg_batch_sel;
     wire                     vec_reg_valid_out;
     wire                     vec_reg_done;
-    wire [32*32-1:0]         vec_data_out_flat = vec_data_out;   // iverilog: 展平
+    wire [32*32-1:0]         vec_data_out_flat = vec_data_out;   // iverilog: flatten for variable indexing
     wire [15:0][7:0]         quant_q8_out;
     wire [15:0][7:0]         quant_scales_out;
     wire                     quant_valid_out;
@@ -178,18 +178,18 @@ module specLLM_dsa_top #(
     // ═══════════════════════════════════════════════════════════════
     // SRAM Banks (shared between DMA and compute datapath)
     // Using scratchpad_1024x128 SRAMs (1024 words × 128 b = 16 KB each).
-    //   addr[9:0]    内部地址 (1024 字)
-    //   addr[12:10]  选 block 内的 scratchpad (8 个 = 一个 1024-bit 宽字)
-    //   addr[13]     **仅 acc**: 选 ping-pong buffer (0 = 组 A, 1 = 组 B)
+    //   addr[9:0]    internal address (1024 words)
+    //   addr[12:10]  selects a scratchpad within the block (8 = one 1024-bit word)
+    //   addr[13]     acc only: selects the ping-pong buffer (0 = group A, 1 = group B)
     //
-    //   容量: wt 8×16 KB = 128 KB / act 8×16 KB = 128 KB / acc 16×16 KB = 256 KB
+    //   Capacity: wt 8x16 KB = 128 KB / act 8x16 KB = 128 KB / acc 16x16 KB = 256 KB
     // ═══════════════════════════════════════════════════════════════
 
-    // ★ 三个 bank 的宏数不再相同 (旧版共用一个 SRAM_COUNT=8)
-    localparam WT_SRAM_COUNT  = 8;      // 权重  128 KB
-    localparam ACT_SRAM_COUNT = 8;      // 激活  128 KB
-    localparam ACC_SRAM_COUNT = 16;     // 累加  256 KB = 2 组 × 8 (ping-pong)
-    localparam ACC_GROUP      = 8;      // 每组 8 个 scratchpad
+    // The three banks no longer have the same macro count (legacy used one SRAM_COUNT=8)
+    localparam WT_SRAM_COUNT  = 8;      // weight  128 KB
+    localparam ACT_SRAM_COUNT = 8;      // activation 128 KB
+    localparam ACC_SRAM_COUNT = 16;     // accumulator 256 KB = 2 groups x 8 (ping-pong)
+    localparam ACC_GROUP      = 8;      // 8 scratchpads per group
 
     // ── Weight SRAM signals ──
     wire [WT_SRAM_COUNT-1:0]                               wt_wr_en;
@@ -198,10 +198,10 @@ module specLLM_dsa_top #(
     wire [WT_SRAM_COUNT-1:0][`SRAM_WIDTH-1:0]              wt_rd_data;
     // Combined control: DMA writes during LOAD, controller reads during COMPUTE
     // They are mutually exclusive in time (sequenced by controller FSM)
-    // ★ 权重加载期: 地址由阵列的 wt_load_idx (0..7) 拼出 —— 见 mspe_array_32x32
+    // During weight load: the address is formed from the array's wt_load_idx (0..7); see mspe_array_32x32
     wire [15:0] wt_load_sram_addr = {mspe_wt_base_addr[15:3], mspe_wt_load_idx};
     wire [15:0] wt_combined_addr = dma_sram_wt_wr_en ? dma_sram_wt_wr_addr
-                                 : mspe_wt_load_busy ? wt_load_sram_addr      // 加载期覆盖
+                                 : mspe_wt_load_busy ? wt_load_sram_addr      // override during load
                                                      : ctrl_sram_wt_rd_addr;
 
     // ── Activation SRAM signals ──
@@ -218,31 +218,31 @@ module specLLM_dsa_top #(
     wire [127:0] quant_q8_flat;             // 16 channels × 8-bit = 128 bits
     assign quant_q8_flat = quant_q8_out;
 
-    // ── Accumulator SRAM signals (16 个 = 2 组 × 8, ping-pong) ──
+    // ── Accumulator SRAM signals (16 = 2 groups x 8, ping-pong) ──
     wire [ACC_SRAM_COUNT-1:0]                              acc_wr_en;
     wire [ACC_SRAM_COUNT-1:0][`SRAM_ADDR_BITS-1:0]         acc_addr;
     wire [ACC_SRAM_COUNT-1:0][`SRAM_WIDTH-1:0]             acc_wr_data;
     wire [ACC_SRAM_COUNT-1:0][`SRAM_WIDTH-1:0]             acc_rd_data;
-    wire [ACC_SRAM_COUNT*`SRAM_WIDTH-1:0]                  acc_rd_flat = acc_rd_data;   // iverilog: 展平以便可变索引
+    wire [ACC_SRAM_COUNT*`SRAM_WIDTH-1:0]                  acc_rd_flat = acc_rd_data;   // iverilog: flatten for variable indexing
     wire [15:0] acc_combined_addr = ctrl_sram_acc_wr_en ? ctrl_sram_acc_wr_addr :
                                     dma_sram_acc_rd_en   ? dma_sram_acc_rd_addr :
                                                            ctrl_sram_acc_rd_addr;
-    // ── ping-pong buffer 选择 (只对 acc 有效) ──
-    //    写组 = addr[13], 读组 = addr[13] (DMA/控制器的地址里带)
+    // ── ping-pong buffer select (acc only) ──
+    //    write group = addr[13], read group = addr[13] (carried in DMA/controller addresses)
     wire        acc_wr_group = acc_combined_addr[13];
     wire        acc_rd_group = acc_combined_addr[13];
 
     genvar si;
     generate
         // ── Weight SRAM bank (8 × 16 KB = 128 KB) ──
-        // ★ csb 修正: **读的时候 8 个 scratchpad 一起使能** (共享 addr[9:0], 拼成
-        //   1024-bit 宽字); 只有写的时候才用 addr[12:10] 选一个。
-        //   旧版读时使能条件是 `rd_en && addr[12:10]==si` ⟹ 只有 1 个 dout 有效,
-        //   另外 7 个恒为 X —— 这是"权重通路根本没接起来"的根因。
+        // csb fix: during a read all 8 scratchpads are enabled (shared addr[9:0] to form
+        //   a 1024-bit word); only writes select one via addr[12:10].
+        //   The earlier read enable was `rd_en && addr[12:10]==si`, so only one dout was
+        //   valid and the other seven stayed X -- the root cause of the broken weight path.
         for (si = 0; si < WT_SRAM_COUNT; si = si + 1) begin : wt_sram_gen
             assign wt_wr_en[si] = dma_sram_wt_wr_en && (wt_combined_addr[12:10] == si);
             assign wt_addr[si]  = wt_combined_addr[9:0];
-            assign wt_wr_data[si] = dma_sram_wt_wr_data;   // 64b → 128b 零扩展 (原 [...127:0] 越界选择产生 x)
+            assign wt_wr_data[si] = dma_sram_wt_wr_data;   // 64b -> 128b zero-extend (earlier [...127:0] out-of-range select produced X)
 
             scratchpad_1024x128_freepdk45 u_wt_sram (
                 .clk0(clk),
@@ -255,17 +255,17 @@ module specLLM_dsa_top #(
         end
 
         // ── Activation SRAM bank (8 × 16 KB = 128 KB) ──
-        // ★ csb 修正同上: 读时 8 个一起使能。
-        // ★ 另有两处旧问题在这里一并记着 (本次未改, 见文件末尾 TODO):
-        //   (a) `quant_act_wr_en` 把同一份 Q8 写进**全部 8 个** ⟹ 7 份是冗余副本;
-        //   (b) act[2]/[3] 的 dout0 没有消费者 (靠 (* keep *) 保住)。
+        // csb fix as above: all 8 enabled during reads.
+        // Two earlier issues are recorded here (not changed in this pass; see TODO at end of file):
+        //   (a) `quant_act_wr_en` writes the same Q8 into all 8 -> 7 redundant copies;
+        //   (b) act[2]/[3] dout0 has no consumer (kept alive by (* keep *)).
         for (si = 0; si < ACT_SRAM_COUNT; si = si + 1) begin : act_sram_gen
-            // 写: DMA (LOAD) 用 addr[12:10] 选一个; Quantify (QUANTIFY) 仍然写全部
+            // Write: DMA (LOAD) selects one via addr[12:10]; Quantify (QUANTIFY) still writes all
             assign act_wr_en[si] = (dma_sram_act_wr_en && (act_combined_addr[12:10] == si))
                                  || quant_act_wr_en;
             assign act_addr[si]  = act_combined_addr[9:0];
             assign act_wr_data[si] = quant_act_wr_en ? quant_q8_flat
-                                                     : dma_sram_act_wr_data;   // 零扩展
+                                                     : dma_sram_act_wr_data;   // zero-extend
 
             (* keep *) scratchpad_1024x128_freepdk45 u_act_sram (
                 .clk0(clk),
@@ -277,24 +277,24 @@ module specLLM_dsa_top #(
             );
         end
 
-        // ── Accumulator SRAM bank (16 × 16 KB = 256 KB = 2 组 × 8, ping-pong) ──
-        //   addr[12:10] 选组内的 scratchpad (8 个 = 1024-bit 宽字)
-        //   addr[13]    选组 (0 = A / 1 = B) —— 让 DMA 读 A 的同时 FP16/VecUnit 写 B
+        // ── Accumulator SRAM bank (16 x 16 KB = 256 KB = 2 groups x 8, ping-pong) ──
+        //   addr[12:10] selects a scratchpad within the group (8 = one 1024-bit word)
+        //   addr[13]    selects the group (0 = A / 1 = B) so DMA can read A while FP16/VecUnit writes B
         for (si = 0; si < ACC_SRAM_COUNT; si = si + 1) begin : acc_sram_gen
-            wire acc_is_grpB = (si >= ACC_GROUP);                    // si 8..15 属 B 组
-            wire [2:0] acc_lane = si[2:0];                            // 组内下标
+            wire acc_is_grpB = (si >= ACC_GROUP);                    // si 8..15 belong to group B
+            wire [2:0] acc_lane = si[2:0];                            // index within the group
 
             assign acc_wr_en[si] = ctrl_sram_acc_wr_en
                                  && (acc_combined_addr[12:10] == acc_lane)
                                  && (acc_combined_addr[13]    == acc_is_grpB);
             assign acc_addr[si]  = acc_combined_addr[9:0];
 
-            // 写数据: FP16 阵列输出 (FP16_COMPUTE) 或 VecUnit 输出
-            //   两者都是 1024 bit = 8 × 128 bit, 按**组内**下标切片
+            // Write data: FP16 array output (FP16_COMPUTE) or VecUnit output
+            //   both are 1024 bit = 8 x 128 bit, sliced by the within-group index
             assign acc_wr_data[si] = fp16_running ? fp16_psums_out[acc_lane*128 +: 128]
                                                   : vec_data_out_flat[acc_lane*`SRAM_WIDTH +: `SRAM_WIDTH];
 
-            // ★ csb: 读时**本组 8 个一起使能** (拼宽字), 写时只选一个
+            // csb: during a read all 8 of this group are enabled (wide word); writes select one
             wire acc_rd_grp = (ctrl_sram_acc_rd_en || dma_sram_acc_rd_en)
                            && (acc_combined_addr[13] == acc_is_grpB);
             scratchpad_1024x128_freepdk45 u_acc_sram (
@@ -309,7 +309,7 @@ module specLLM_dsa_top #(
     endgenerate
 
     // ── DMA accumulator read data (to TL response path) ──
-    //   STORE 阶段: 从**当前读组**里选一个 scratchpad
+    //   STORE phase: select one scratchpad from the current read group
     wire [3:0] dma_acc_rd_scratchpad = {acc_combined_addr[13], acc_combined_addr[12:10]};
     wire [127:0] dma_acc_rd_raw;
     assign dma_acc_rd_raw = acc_rd_flat[dma_acc_rd_scratchpad*`SRAM_WIDTH +: `SRAM_WIDTH];
@@ -337,7 +337,7 @@ assign dma_sram_acc_rd_data = dma_acc_rd_raw[`TL_DATA_WIDTH-1:0];
         .mode         (mspe_mode[0]),
         .start        (mspe_start),
         .accumulate   (1'b1),
-        // ★ 权重加载: 端口只有 1024 bit, 缓冲/FSM 都在阵列内部
+        // weight load: the port is only 1024 bit; buffer and load FSM live inside the array
         .wt_load_req  (mspe_wt_load_req),
         .wt_wide      (mspe_wt_wide),
         .wt_load_busy (mspe_wt_load_busy),
@@ -347,12 +347,12 @@ assign dma_sram_acc_rd_data = dma_acc_rd_raw[`TL_DATA_WIDTH-1:0];
     );
 
     // ═══════════════════════════════════════════════════════════════
-    // MsPE 权重宽读: 把 8 个 scratchpad 的 dout 拼成 1024 bit 交给阵列
+    // MsPE weight wide read: assemble the 8 scratchpad douts into 1024 bit for the array
     // ═══════════════════════════════════════════════════════════════
-    //   ★ 缓冲与加载 FSM 已经**下移进 mspe_array_32x32** —— 顶层只负责:
-    //     ① 把 wt_load_idx 拼成 SRAM 行地址 (见 wt_combined_addr)
-    //     ② 把 8 个 dout 拼成宽字喂回去
-    //   好处: MsPE block 的 IO 引脚 9,477 → 2,314; 顶层跨宏线少 87.5%。
+    //   The buffer and load FSM are inside mspe_array_32x32; the top level only:
+    //     1) forms the SRAM row address from wt_load_idx (see wt_combined_addr)
+    //     2) assembles the 8 dout values into the wide word
+    //   Benefit: MsPE block IO pins 9,477 -> 2,314; top-level cross-macro wires down 87.5%.
     assign mspe_wt_wide = {wt_rd_data[7], wt_rd_data[6], wt_rd_data[5], wt_rd_data[4],
                            wt_rd_data[3], wt_rd_data[2], wt_rd_data[1], wt_rd_data[0]};
 
@@ -617,7 +617,7 @@ assign dma_sram_acc_rd_data = dma_acc_rd_raw[`TL_DATA_WIDTH-1:0];
         .mspe_start           (mspe_start),
         .mspe_mode            (mspe_mode),
         .mspe_done            (mspe_done),
-        .mspe_wt_load_req     (mspe_wt_load_req),     // ★ 权重加载握手
+        .mspe_wt_load_req     (mspe_wt_load_req),     // weight-load handshake
         .mspe_wt_base_addr    (mspe_wt_base_addr),
         .quan_red_pipe_start  (quan_red_pipe_start),
         .quan_red_pipe_done   (quan_red_pipe_done),
@@ -641,8 +641,8 @@ assign dma_sram_acc_rd_data = dma_acc_rd_raw[`TL_DATA_WIDTH-1:0];
 
     // ── Done detection via cycle counters ──
     // Systolic array drain: ROWS + COLS cycles for data to propagate through
-    localparam MSPE_DRAIN_CYCLES  = 32 + 32;   // 64 cycles for 32×32 MsPE (旧: 32+16=48)
-    localparam FP16_DRAIN_CYCLES  = 32 + 32;   // 64 cycles for 32×32 FP16
+    localparam MSPE_DRAIN_CYCLES  = 32 + 32;   // 64 cycles for 32x32 MsPE
+    localparam FP16_DRAIN_CYCLES  = 32 + 32;   // 64 cycles for 32x32 FP16
 
     reg [7:0]  mspe_cycle_cnt;
     reg [7:0]  fp16_cycle_cnt;
@@ -689,7 +689,7 @@ assign dma_sram_acc_rd_data = dma_acc_rd_raw[`TL_DATA_WIDTH-1:0];
     assign fp16_array_done   = fp16_array_done_wire;
     assign quan_red_pipe_done = quan_red_valid_out;
 
-    // ── 主口 DMA: DSA 主动访问 DRAM ──
+    // ── Master DMA: DSA-initiated DRAM access ──
     tl_master_dma #(.DW(64)) u_dma_master (
         .clk(clk), .rst_n(rst_n),
         .start(m_dma_start), .rw(m_dma_rw),

@@ -49,17 +49,17 @@ module dsa_controller #(
     output reg  [1:0]               mspe_mode,
     input  wire                     mspe_done,
 
-    // ── MsPE 权重加载 (★ 新增) ──
-    // MsPE 是 **weight-stationary** 的: 权重只在每次 `mspe_start` 时锁进 PE 寄存器,
-    // 之后整个计算相位都不再读。所以 8192 bit 的权重 tile 不需要"每拍 8192 bit"的
-    // SRAM 带宽 —— 用**寄存器缓冲**分 8 拍从 wt SRAM 宽读灌满即可。
-    //   一拍宽读 = 8 scratchpad × 128 b = 1024 b  ⟹ 8 拍灌满 8192 b
-    //   子模块加载 FSM 在 load_req 之后保持 wt_loading 8 拍, 再花 1 拍清标志
-    //   ⟹ 控制器在本状态等 **9 拍**, 然后才进 S_COMPUTE_MSPS 拉 mspe_start。
-    output reg                      mspe_wt_load_req,   // 1 拍脉冲, 启动宽读
-    output reg  [15:0]              mspe_wt_base_addr,  // 本 tile 在 wt SRAM 的起始行
-
-
+    // ── MsPE weight load (new) ──
+    // MsPE is weight-stationary: weights are latched into the PE registers only
+    // at each `mspe_start` and are not read again during the compute phase. An
+    // 8192-bit weight tile therefore does not need 8192 bits of SRAM bandwidth
+    // per cycle -- a register buffer filled by 8 wide reads is sufficient.
+    //   One wide read = 8 scratchpads x 128 b = 1024 b  => 8 reads fill 8192 b
+    //   The submodule FSM holds wt_loading for 8 cycles after load_req, then one
+    //   more cycle to clear the flag => the controller waits 9 cycles here, then
+    //   enters S_COMPUTE_MSPS and asserts mspe_start.
+    output reg                      mspe_wt_load_req,   // 1-cycle pulse, starts the wide read
+    output reg  [15:0]              mspe_wt_base_addr,  // first wt SRAM row of this tile
     output reg                      quan_red_pipe_start,
     input  wire                     quan_red_pipe_done,
 
@@ -98,17 +98,17 @@ module dsa_controller #(
     localparam S_VECTOR          = 4'd7;
     localparam S_STORE_RESULTS   = 4'd8;
     localparam S_DONE            = 4'd9;
-    localparam S_MSPS_WLOAD      = 4'd11;   // ★ 新增: MsPE 权重 8 拍宽读 → 寄存器缓冲
+    localparam S_MSPS_WLOAD      = 4'd11;   // new: 8-cycle MsPE weight wide read -> register buffer
 
-    // ── MsPE 权重加载计数器 ──
-    //   子模块 FSM: load_req 之后 wt_loading 保持 8 拍 (cnt 0..7), 第 8 拍清标志
-    //   ⟹ 控制器从拉 load_req 到确认加载完, 一共等 9 拍
+    // ── MsPE weight-load counter ──
+    //   Submodule FSM: after load_req, wt_loading stays high for 8 cycles (cnt 0..7),
+    //   then clears the flag => the controller waits 9 cycles for load completion
     localparam WT_LOAD_CYCLES = 5'd9;
     reg  [4:0] wt_load_cnt;
     wire wt_load_cnt_done = (wt_load_cnt >= WT_LOAD_CYCLES);
-    // 一个权重 tile = 32×32×8b = 8192 b = 8 行 × 8 scratchpad
-    // ⚠️ K 方向的循环尚未实现 (一次调用只算一个 tile), 所以 base 恒 0;
-    //    将来加 K 循环时, 每完成一个 tile 就 +8。
+    // One weight tile = 32x32x8b = 8192 b = 8 rows x 8 scratchpads
+    // NOTE: the K-direction loop is not implemented (one tile per call), so base is always 0;
+    //       when the K loop is added, increment by 8 per completed tile.
     localparam WT_TILE_ROWS = 16'd8;
 
     // ── DMA target encoding ──
@@ -157,7 +157,7 @@ module dsa_controller #(
 
             S_QUANTIFY:
                 if (quantify_engine_done)
-                    next_state = S_MSPS_WLOAD;      // ★ 先去加载权重, 再算
+                    next_state = S_MSPS_WLOAD;      // load weights first, then compute
 
             S_MSPS_WLOAD:
                 if (wt_load_cnt_done)
@@ -236,7 +236,7 @@ module dsa_controller #(
             // ── Default deassertions (pulsed signals) ──
             dma_start            <= 1'b0;
             mspe_start           <= 1'b0;
-            mspe_wt_load_req     <= 1'b0;       // ★ 1 拍脉冲
+            mspe_wt_load_req     <= 1'b0;       // 1-cycle pulse
             quan_red_pipe_start  <= 1'b0;
             quantify_engine_start <= 1'b0;
             vector_unit_start    <= 1'b0;
@@ -314,23 +314,23 @@ module dsa_controller #(
                 end
 
                 // ──────────────────────────────────────────────
-                // MSPS_WLOAD: MsPE 权重 8 拍宽读 → 8192-bit 寄存器缓冲 ★ 新增
+                // MSPS_WLOAD: 8-cycle MsPE weight wide read -> 8192-bit register buffer (new)
                 // ──────────────────────────────────────────────
-                //   weight-stationary ⟹ 权重不需要每拍 8192 bit 的 SRAM 带宽,
-                //   分 8 拍灌进缓冲即可 (稳态端口占用 8/64 = 12.5%)。
-                //   本状态: 第 1 拍拉 load_req, 之后等 9 拍让子模块加载完。
+                //   weight-stationary => weights do not need 8192 bits of SRAM bandwidth per cycle;
+                //   filling the buffer over 8 cycles gives 8/64 = 12.5% steady-state port usage.
+                //   This state: assert load_req in cycle 1, then wait 9 cycles for the submodule.
                 S_MSPS_WLOAD: begin
                     if (!phase_started) begin
-                        mspe_wt_load_req <= 1'b1;       // 1 拍脉冲, 启动宽读
-                        mspe_wt_base_addr <= 16'd0;     // K 循环未实现, base 恒 0
+                        mspe_wt_load_req <= 1'b1;       // 1-cycle pulse, starts the wide read
+                        mspe_wt_base_addr <= 16'd0;     // K loop not implemented, base always 0
                         wt_load_cnt      <= 5'd0;
                         phase_started    <= 1'b1;
                     end else begin
-                        mspe_wt_load_req <= 1'b0;       // 脉冲只持续一拍
+                        mspe_wt_load_req <= 1'b0;       // pulse lasts one cycle
                         if (!wt_load_cnt_done)
                             wt_load_cnt <= wt_load_cnt + 5'd1;
                     end
-                    // 加载期间让 wt SRAM 处于宽读状态 (csb 会把 8 个一起使能)
+                    // keep the wt SRAM in wide-read mode during loading (csb enables all 8)
                     sram_weight_rd_en   <= 1'b1;
                 end
 

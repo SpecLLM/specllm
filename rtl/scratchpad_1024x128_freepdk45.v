@@ -16,7 +16,7 @@ module scratchpad_1024x128_freepdk45(
   parameter RAM_DEPTH = 1 << ADDR_WIDTH;
   // FIXME: This delay is arbitrary.
   parameter DELAY = 3 ;
-  parameter VERBOSE = 0 ; //Set to 0 to only display warnings (verilator: 默认关, 免 %m)
+  parameter VERBOSE = 0 ; //Set to 0 to only display warnings (verilator: off by default to avoid %m)
   parameter T_HOLD = 1 ; //Delay to hold dout value after posedge. Value is arbitrary
 
 `ifdef USE_POWER_PINS

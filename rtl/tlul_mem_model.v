@@ -1,14 +1,15 @@
-// tlul_mem_model.v — TileLink-UL 64-bit **流水化** DRAM 模型（2026-10-10 改）
+// tlul_mem_model.v — Pipelined TileLink-UL 64-bit DRAM model
 //
-// 2026-10-10: 从"单笔"改成 **LAT 深流水**：每拍接受 1 笔 A, LAT 拍后吐 D。
-//   ⇒ 稳态吞吐 = 1 拍/笔 (= 8 B/cyc), 这才是"直连 DRAM 的带宽上限"。
-//   （旧版 S_IDLE→CNT→RESP 一笔 ~6 拍, 会把主口的 MLP 收益全部吃掉。）
+// 2026-10-10: Changed from single-beat to a LAT-deep pipeline: accepts one A
+//   beat per cycle and returns D after LAT cycles.
+//   Steady-state throughput = 1 beat/cycle (= 8 B/cyc), the direct-DRAM limit.
+//   (The old S_IDLE->CNT->RESP model took ~6 cycles per beat and hid master MLP gains.)
 `timescale 1ns/1ps
 `default_nettype none
 
 module tlul_mem_model #(
-    parameter DEPTH_WORDS = 1 << 20,   // 默认 1M × 8B = 8 MB
-    parameter LAT         = 4          // A→D 拍数（流水深度）
+    parameter DEPTH_WORDS = 1 << 20,   // default 1M x 8B = 8 MB
+    parameter LAT         = 4          // A->D latency (pipeline depth)
 ) (
     input  wire         clk,
     input  wire         rst_n,
@@ -43,7 +44,7 @@ module tlul_mem_model #(
     wire        is_get = (a_opcode == OP_GET);
     wire        is_put = (a_opcode == OP_PUT);
 
-    assign a_ready = 1'b1;              // 每拍接受一笔
+    assign a_ready = 1'b1;              // accept one beat per cycle
 
     reg [LAT-1:0] dv;
     reg [4:0]     dsrc [0:LAT-1];

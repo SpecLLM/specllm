@@ -1,23 +1,23 @@
-// dram_model.v — 共享 DRAM 模型（2 个 TL-UL 64-bit 从口 + 带宽闸门 + 每口计量）
+// dram_model.v — Shared DRAM model (2 TL-UL 64-bit slave ports + bandwidth gate + per-port counters)
 //
-// 2026-10-11: 按论文口径把 DRAM 总带宽定成 **64 GB/s**：
-//   BPC = 每拍接受的 beat 数（64-bit/beat）。
-//     BPC=8 @1GHz ⇒ 8×8B×1e9 = 64 GB/s  （论文的池）
-//     BPC=1 @1GHz ⇒ 8 GB/s             （用来逼出争抢）
-//   两个从口聚合受 BPC 限制；轮询让两口的服务公平。
-//   输出 `o_beats0/1` = 各口累计被服务的 beat 数（用来算各口的实测带宽）。
+// 2026-10-11: Aggregate DRAM bandwidth fixed at 64 GB/s per the paper:
+//   BPC = beats accepted per cycle (64-bit/beat).
+//     BPC=8 @1GHz => 8x8Bx1e9 = 64 GB/s (paper pool)
+//     BPC=1 @1GHz => 8 GB/s           (used to force contention)
+//   The two slave ports share the BPC limit; round-robin keeps service fair.
+//   `o_beats0/1` = cumulative beats served per port (for measured bandwidth).
 `timescale 1ns/1ps
 `default_nettype none
 
 module dram_model #(
     parameter DEPTH_WORDS = 1 << 20,
     parameter LAT         = 4,
-    parameter BPC         = 8          // 每拍聚合 beat 数 (8 ⇒ 64 GB/s @1 GHz)
+    parameter BPC         = 8          // aggregate beats per cycle (8 => 64 GB/s @1 GHz)
 ) (
     input  wire         clk,
     input  wire         rst_n,
 
-    // ── 从口 0 ──
+    // ── Slave port 0 ──
     input  wire         a0_valid, output wire a0_ready,
     input  wire [2:0]   a0_opcode, input wire [3:0] a0_size,
     input  wire [4:0]   a0_source, input wire [31:0] a0_address,
@@ -26,7 +26,7 @@ module dram_model #(
     output wire [2:0]   d0_opcode, output wire [4:0] d0_source,
     output wire [63:0]  d0_data,
 
-    // ── 从口 1 ──
+    // ── Slave port 1 ──
     input  wire         a1_valid, output wire a1_ready,
     input  wire [2:0]   a1_opcode, input wire [3:0] a1_size,
     input  wire [4:0]   a1_source, input wire [31:0] a1_address,
@@ -35,7 +35,7 @@ module dram_model #(
     output wire [2:0]   d1_opcode, output wire [4:0] d1_source,
     output wire [63:0]  d1_data,
 
-    // ── 计量 ──
+    // ── Counters ──
     output reg  [31:0]  o_beats0,
     output reg  [31:0]  o_beats1
 );
@@ -47,23 +47,23 @@ module dram_model #(
     integer i;
     initial for (i = 0; i < DEPTH_WORDS; i = i + 1) mem[i] = 64'd0;
 
-    // ── 每拍带宽闸门 + 轮询 ──
-    reg        rr;                          // 上一拍的优先口
+    // ── Per-cycle bandwidth gate + round-robin ──
+    reg        rr;                          // priority port from previous cycle
     wire       first0 = ~rr;
-    reg  [7:0] c;                           // 本拍剩余 credit（每拍重置为 BPC）
+    reg  [7:0] c;                           // remaining credits this cycle (reset to BPC each cycle)
     always @(posedge clk or negedge rst_n)
         if (!rst_n) begin rr <= 1'b0; c <= BPC[7:0]; end
-        else        begin rr <= ~rr; c <= 0; end     // c 用组合读, 见下
+        else        begin rr <= ~rr; c <= 0; end     // c is read combinationally, see below
 
-    // take0/take1: 每口最多 1 笔/拍, 由 credit 与公平性决定
-    wire credit_ok = (BPC >= 2) || 1'b1;    // BPC>=2 ⇒ 两口都不受限; BPC=1 ⇒ 只放一个
+    // take0/take1: at most one beat per port per cycle, gated by credit and fairness
+    wire credit_ok = (BPC >= 2) || 1'b1;    // BPC>=2 => both ports allowed; BPC=1 => only one
     wire take0 = a0_valid && ((BPC >= 2) || first0);
     wire take1 = a1_valid && ((BPC >= 2) || ~first0) && !(take0 && (BPC < 2));
 
     assign a0_ready = take0;
     assign a1_ready = take1;
 
-    // ── 两口各一条 LAT 深流水 ──
+    // ── One LAT-deep pipeline per port ──
     reg [LAT-1:0] v0, v1;
     reg [4:0]  s0 [0:LAT-1], s1 [0:LAT-1];
     reg [2:0]  k0 [0:LAT-1], k1 [0:LAT-1];

@@ -165,7 +165,7 @@ DSA die: 4200 x 4300 um = 18.06 mm²
 
 ## 4. RTL Implementation (Complete)
 
-### 4.1 File Inventory (26 files, 4490 lines)
+### 4.1 File Inventory (26 files, 4505 lines)
 
 ```
 rtl/
@@ -173,8 +173,8 @@ rtl/
 ├── dsa_controller.v                (435 lines)  10-state sequence FSM
 ├── dsa_params.vh                   ( 45 lines)  DSA parameter defines
 ├── sparsenn_params.vh              ( 54 lines)  Base parameter defines
-├── mspe_cell.v                     (120 lines)  DynLogic Shift-Mux-Add Tree PE
-├── mspe_array_32x32.v              (160 lines)  32×32 MsPE systolic grid
+├── mspe_cell.v                     (125 lines)  DynLogic Shift-Mux-Add Tree PE
+├── mspe_array_32x32.v              (167 lines)  32×32 MsPE systolic grid
 ├── quan_red_pipe.v                 (210 lines)  32-ch mixed-precision fusion
 ├── quantify_engine.v               (505 lines)  FP16→Q8K quantization pipeline
 ├── quantify_buffer_sram.v          ( 32 lines)  128×1024 behavioral SRAM
@@ -191,9 +191,9 @@ rtl/
 ├── fp32_sqrt.v                     ( 36 lines)  FP32 square root
 ├── scratchpad_1024x128_freepdk45.v ( 73 lines)  OpenRAM SRAM macro
 ├── tl_slave_if.v                   (486 lines)  TileLink-UL slave + CSR
-├── tl_master_dma.v                 (111 lines)  Multi-outstanding TL-UL master DMA
+├── tl_master_dma.v                 (113 lines)  Multi-outstanding TL-UL master DMA
 ├── tlul_arb4.v                     (102 lines)  4:1 TL-UL round-robin arbiter
-├── tlul_mem_model.v                ( 93 lines)  Pipelined TL-UL DRAM model
+├── tlul_mem_model.v                ( 94 lines)  Pipelined TL-UL DRAM model
 └── dram_model.v                    (125 lines)  Shared DRAM model (BW gate)
 ```
 

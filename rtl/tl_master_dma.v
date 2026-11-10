@@ -1,20 +1,22 @@
-// tl_master_dma.v — DSA 的 TileLink-UL **多 outstanding** 主口 DMA（2026-10-10 改）
+// tl_master_dma.v — Multi-outstanding TileLink-UL master DMA
 //
-// 2026-10-10: 从单 outstanding 改成 **最多 DEPTH 笔在飞**（a_source = issued 轮转）。
-//   ⇒ 主口不再逐笔等 D, 稳态可 1 拍/笔发出, 从而量到"直连 DRAM 的带宽上限"。
-//   读方向用 XOR 聚合 (与顺序无关), 故不需要按 source 回配。
+// 2026-10-10: Changed from single-outstanding to up to DEPTH requests in flight
+//   (a_source = issued round-robin).
+//   The master no longer waits for each D; it can sustain one issue per cycle,
+//   exposing the direct-DRAM bandwidth limit.
+//   Reads are XOR-aggregated (order-independent), so no per-source reassembly.
 `timescale 1ns/1ps
 `default_nettype none
 
 module tl_master_dma #(
     parameter DW    = 64,
-    parameter DEPTH = 16        // 在飞深度 (≥ mem 的 LAT 即可不节流)
+    parameter DEPTH = 16        // in-flight depth (>= mem LAT avoids throttling)
 ) (
     input  wire         clk,
     input  wire         rst_n,
 
     input  wire         start,
-    input  wire         rw,          // 0 = 从 DRAM 读, 1 = 写 DRAM
+    input  wire         rw,          // 0 = read from DRAM, 1 = write to DRAM
     input  wire [31:0]  base_addr,
     input  wire [15:0]  n_words,
     output reg          busy,
@@ -56,7 +58,7 @@ module tl_master_dma #(
     assign a_mask  = {{(DW/8-8){1'b0}}, 8'hFF};
     assign d_ready = 1'b1;
 
-    // 还能发就发: 载荷没发完 且 在飞数 < DEPTH
+    // Issue while payload remains and in-flight count < DEPTH
     assign a_valid = (st == S_RUN) && (issued < n_q) && (outp < DEPTH);
 
     wire issue_ok = a_valid & a_ready;
@@ -92,7 +94,7 @@ module tl_master_dma #(
                         checksum <= checksum ^ d_data;
                         last_data <= d_data;
                     end
-                    // 在飞计数: 同拍 issue+d 则不变
+                    // In-flight count: unchanged when issue and D complete in the same cycle
                     if (issue_ok && !d_ok)      outp <= outp + 16'd1;
                     else if (!issue_ok && d_ok) outp <= outp - 16'd1;
                     if (issued >= n_q && outp == 16'd0) st <= S_DONE;
