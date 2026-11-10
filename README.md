@@ -6,6 +6,9 @@ Processing Elements), **QuanRedPipe** (Quantization Reduction Pipeline), and
 **QuantifyEngine** to accelerate low-bit quantized MatMul with structured
 reduction.
 
+> **Note:** This is a development snapshot, not the official release version.
+> 说明：本版本代码为非正式版。
+
 ## Architecture
 
 ```
